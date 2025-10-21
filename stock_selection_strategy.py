@@ -28,15 +28,108 @@ def collect_all_stocks(sector_stocks):
             all_stocks.append(stock)
     return all_stocks
 
+def calculate_15day_momentum_reversal_factor(stock):
+    """
+    计算短期15天动量反转因子
+    
+    基于15个交易日的历史价格数据，结合多种技术指标：
+    1. 短期动量：最近5天 vs 前10天的表现
+    2. 价格位置：当前价格在15天内的相对位置
+    3. 波动率调整：考虑价格波动对动量的影响
+    4. 成交量确认：结合量比因子确认动量强度
+    5. 资金流向：主力资金流向作为辅助确认
+    
+    返回：综合动量反转得分，正值表示动量策略，负值表示反转策略
+    """
+    # 检查是否有历史价格数据
+    if 'history_prices' not in stock or not stock['history_prices']:
+        return 0.0
+    
+    history_prices = stock['history_prices']
+    
+    # 确保有足够的历史数据（至少15个交易日）
+    if len(history_prices) < 15:
+        return 0.0
+    
+    # 提取收盘价序列（从最新到最旧）
+    close_prices = [price['close_price'] for price in history_prices]
+    
+    # 计算关键价格点
+    current_price = close_prices[0]  # 最新价格
+    price_5days_ago = close_prices[4]  # 5天前价格
+    price_10days_ago = close_prices[9]  # 10天前价格
+    price_15days_ago = close_prices[14]  # 15天前价格
+    
+    # 计算历史高点和低点
+    history_high = max(close_prices)
+    history_low = min(close_prices)
+    
+    # 1. 短期动量计算（最近5天 vs 前10天）
+    momentum_5day = (current_price - price_5days_ago) / price_5days_ago * 100
+    momentum_10day = (price_5days_ago - price_15days_ago) / price_15days_ago * 100
+    
+    # 2. 价格位置因子（当前价格在15天内的相对位置）
+    if history_high != history_low:
+        price_position = (current_price - history_low) / (history_high - history_low) * 100
+    else:
+        price_position = 50.0
+    
+    # 3. 波动率调整因子（15天价格波动率）
+    price_returns = []
+    for i in range(len(close_prices) - 1):
+        if close_prices[i+1] > 0:
+            daily_return = (close_prices[i] - close_prices[i+1]) / close_prices[i+1]
+            price_returns.append(daily_return)
+    
+    if price_returns:
+        volatility = np.std(price_returns) * np.sqrt(252)  # 年化波动率
+        volatility_factor = min(1.0, 0.3 / (volatility + 0.1))  # 波动率越大，因子越小
+    else:
+        volatility_factor = 1.0
+    
+    # 4. 成交量确认因子
+    volume_ratio = stock.get('volume_ratio', 1.0)
+    volume_factor = min(2.0, volume_ratio)  # 量比因子，上限为2
+    
+    # 5. 资金流向因子
+    main_ratio = stock.get('main_ratio', 0)
+    fund_factor = 1.0 + main_ratio * 0.1  # 主力净占比每1%增加0.1的因子
+    
+    # 6. 综合动量反转逻辑
+    # 如果短期动量很强且价格处于高位，倾向于反转
+    # 如果短期动量适中且价格处于中低位，倾向于动量
+    
+    if momentum_5day > 15:  # 短期涨幅过大
+        # 反转策略：短期涨幅过大，预期回调
+        if price_position > 80:  # 价格处于高位
+            reversal_score = -momentum_5day * 0.8
+        else:
+            reversal_score = -momentum_5day * 0.5
+    elif momentum_5day < -10:  # 短期跌幅过大
+        # 反转策略：短期跌幅过大，预期反弹
+        if price_position < 20:  # 价格处于低位
+            reversal_score = abs(momentum_5day) * 0.8
+        else:
+            reversal_score = abs(momentum_5day) * 0.5
+    else:
+        # 动量策略：短期动量适中
+        if momentum_10day > 0:  # 中期趋势向上
+            reversal_score = momentum_5day * 1.2
+        else:  # 中期趋势向下
+            reversal_score = momentum_5day * 0.8
+    
+    # 应用调整因子
+    final_score = (reversal_score * volatility_factor * volume_factor * fund_factor + 
+                  price_position * 0.1)  # 价格位置作为辅助因子
+    
+    # 归一化到合理范围
+    final_score = max(-50, min(50, final_score))
+    
+    return final_score
+
 def calculate_momentum_factor(stock, market_median_change=None):
     """
-    计算动态调整动量反转因子
-    
-    逻辑说明：
-    1. 基于股票的涨跌幅、主力资金流入和市场中位数涨跌幅进行动态调整
-    2. 当股票涨幅过大时，倾向于反转策略
-    3. 当股票涨幅适中时，倾向于动量策略
-    4. 结合主力资金流向作为重要参考
+    计算动态调整动量反转因子（保留原有函数，但标记为旧版本）
     """
     # 基础动量因子（基于涨跌幅）
     change_rate = stock.get('change_rate', 0)
@@ -48,6 +141,15 @@ def calculate_momentum_factor(stock, market_median_change=None):
     # 超大单流入因子
     super_large_inflow = stock.get('super_large_inflow', 0)
     super_large_ratio = stock.get('super_large_ratio', 0)
+    
+    # 量比因子 - 新增
+    volume_ratio = stock.get('volume_ratio', 1.0)
+    
+    # 计算量比因子得分（非线性转换，量比越大得分越高，但有上限）
+    volume_factor = min(3.0, volume_ratio) - 1.0  # 基础量比因子，大于1表示放量
+    if volume_ratio > 3.0:
+        # 量比超过3视为异常放量，给予额外奖励但增速放缓
+        volume_factor = 2.0 + (volume_ratio - 3.0) * 0.2
     
     # 计算资金强度综合得分
     fund_strength = 0.6 * (main_inflow / 1e8) + 0.4 * main_ratio
@@ -62,16 +164,19 @@ def calculate_momentum_factor(stock, market_median_change=None):
     else:
         reversal_threshold = 5.0  # 默认反转阈值
     
-    # 根据涨跌幅的不同区间应用不同策略
+    # 根据涨跌幅的不同区间应用不同策略，并引入量比因子
     if change_rate > reversal_threshold:
         # 涨幅过大，应用反转策略，得分降低
-        momentum_score = -0.5 * change_rate + 1.5 * fund_strength + 1.0 * super_large_strength
+        # 量比大的股票可能会继续上涨，因此反转力度减弱
+        momentum_score = -0.5 * change_rate + 1.5 * fund_strength + 1.0 * super_large_strength + 0.8 * volume_factor
     elif change_rate < -2.0:
         # 跌幅较大，应用反转策略，得分提高
-        momentum_score = 0.8 * abs(change_rate) + 1.0 * fund_strength + 0.8 * super_large_strength
+        # 量比大的下跌股票可能存在超卖情况，反转潜力更大
+        momentum_score = 0.8 * abs(change_rate) + 1.0 * fund_strength + 0.8 * super_large_strength + 1.2 * volume_factor
     else:
         # 涨幅适中，应用动量策略
-        momentum_score = 1.2 * change_rate + 1.5 * fund_strength + 1.2 * super_large_strength
+        # 量比大的股票动量更强
+        momentum_score = 1.2 * change_rate + 1.5 * fund_strength + 1.2 * super_large_strength + 1.0 * volume_factor
     
     # 添加价格因素的调整（价格较低的股票可能有更大的上涨空间）
     price = stock.get('price', 100)
@@ -83,12 +188,75 @@ def calculate_momentum_factor(stock, market_median_change=None):
     
     return momentum_score
 
+def select_stocks_with_15day_factor(stock_data, top_n=10):
+    """
+    使用短期15天动量反转因子从所有股票中选择top_n只
+    """
+    # 收集所有股票，添加错误处理
+    if 'sector_stocks' in stock_data:
+        all_stocks = collect_all_stocks(stock_data['sector_stocks'])
+    else:
+        # 尝试其他可能的数据结构格式
+        all_stocks = []
+        print("警告: 'sector_stocks' 键不存在，尝试查找其他格式的数据...")
+        
+        # 如果stock_data本身就是一个字典，尝试直接从中提取股票数据
+        if isinstance(stock_data, dict):
+            for key, value in stock_data.items():
+                if isinstance(value, list) and len(value) > 0 and isinstance(value[0], dict) and 'code' in value[0]:
+                    # 找到可能的股票列表
+                    for stock in value:
+                        stock['sector'] = key
+                        all_stocks.append(stock)
+    
+    if not all_stocks:
+        print("错误: 未能找到任何股票数据")
+        return []
+    
+    print(f"总共收集到{len(all_stocks)}只股票")
+    
+    # 统计有历史价格数据的股票数量
+    stocks_with_history = [s for s in all_stocks if 'history_prices' in s and len(s.get('history_prices', [])) >= 15]
+    print(f"其中{len(stocks_with_history)}只股票有完整的15天历史价格数据")
+    
+    # 计算每只股票的15天动量反转因子得分
+    for stock in all_stocks:
+        stock['15day_momentum_score'] = calculate_15day_momentum_reversal_factor(stock)
+        
+        # 同时计算旧版因子用于对比
+        change_rates = [s.get('change_rate', 0) for s in all_stocks]
+        market_median_change = np.median(change_rates) if change_rates else 0
+        stock['old_momentum_score'] = calculate_momentum_factor(stock, market_median_change)
+    
+    # 按15天动量反转因子得分排序，选择前top_n只股票
+    selected_stocks = sorted(all_stocks, key=lambda x: x['15day_momentum_score'], reverse=True)[:top_n]
+    
+    return selected_stocks
+
 def select_stocks(stock_data, top_n=10):
     """
-    使用动态调整动量反转因子从所有股票中选择top_n只
+    使用动态调整动量反转因子从所有股票中选择top_n只（兼容旧版本）
     """
-    # 收集所有股票
-    all_stocks = collect_all_stocks(stock_data['sector_stocks'])
+    # 收集所有股票，添加错误处理
+    if 'sector_stocks' in stock_data:
+        all_stocks = collect_all_stocks(stock_data['sector_stocks'])
+    else:
+        # 尝试其他可能的数据结构格式
+        all_stocks = []
+        print("警告: 'sector_stocks' 键不存在，尝试查找其他格式的数据...")
+        
+        # 如果stock_data本身就是一个字典，尝试直接从中提取股票数据
+        if isinstance(stock_data, dict):
+            for key, value in stock_data.items():
+                if isinstance(value, list) and len(value) > 0 and isinstance(value[0], dict) and 'code' in value[0]:
+                    # 找到可能的股票列表
+                    for stock in value:
+                        stock['sector'] = key
+                        all_stocks.append(stock)
+    
+    if not all_stocks:
+        print("错误: 未能找到任何股票数据")
+        return []
     
     print(f"总共收集到{len(all_stocks)}只股票")
     
@@ -105,13 +273,18 @@ def select_stocks(stock_data, top_n=10):
     
     return selected_stocks
 
-def generate_selection_report(selected_stocks):
+def generate_selection_report(selected_stocks, use_15day_factor=False):
     """
     生成选股报告
+    
+    Args:
+        selected_stocks: 选中的股票列表
+        use_15day_factor: 是否使用15天动量反转因子
     """
     report = {
         'selection_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
         'total_selected': len(selected_stocks),
+        'factor_type': '15day_momentum_reversal' if use_15day_factor else 'original_momentum',
         'selected_stocks': []
     }
     
@@ -125,8 +298,18 @@ def generate_selection_report(selected_stocks):
             'change_rate': stock.get('change_rate', 0),
             'main_inflow': stock.get('main_inflow', 0),
             'main_ratio': stock.get('main_ratio', 0),
-            'momentum_score': stock.get('momentum_score', 0)
+            'super_large_inflow': stock.get('super_large_inflow', 0),
+            'super_large_ratio': stock.get('super_large_ratio', 0),
+            'large_inflow': stock.get('large_inflow', 0),
+            'large_ratio': stock.get('large_ratio', 0)
         }
+        
+        if use_15day_factor:
+            stock_report['15day_momentum_score'] = stock.get('15day_momentum_score', 0)
+            stock_report['old_momentum_score'] = stock.get('old_momentum_score', 0)
+        else:
+            stock_report['momentum_score'] = stock.get('momentum_score', 0)
+        
         report['selected_stocks'].append(stock_report)
     
     return report
@@ -142,19 +325,56 @@ def save_selection_result(report, output_file='selected_stocks.json'):
     except Exception as e:
         print(f"保存选股结果失败: {e}")
 
-def print_selection_summary(selected_stocks):
+def save_combined_selection_result(report_old, report_new, output_file='selected_stocks_combined.json'):
+    """
+    保存合并的选股结果到单个JSON文件
+    """
+    try:
+        combined_report = {
+            'selection_time': report_new.get('selection_time', ''),
+            'total_selected': {
+                'original_momentum': report_old.get('total_selected', 0),
+                '15day_momentum_reversal': report_new.get('total_selected', 0)
+            },
+            'original_momentum_stocks': report_old.get('selected_stocks', []),
+            '15day_momentum_reversal_stocks': report_new.get('selected_stocks', [])
+        }
+        
+        with open(output_file, 'w', encoding='utf-8') as f:
+            json.dump(combined_report, f, ensure_ascii=False, indent=2)
+        print(f"合并选股结果已保存到 {output_file}")
+    except Exception as e:
+        print(f"保存合并选股结果失败: {e}")
+
+def print_selection_summary(selected_stocks, use_15day_factor=False):
     """
     打印选股结果摘要
+    
+    Args:
+        selected_stocks: 选中的股票列表
+        use_15day_factor: 是否使用15天动量反转因子
     """
-    print("\n=== 选股结果摘要 ===")
+    factor_type = "15天动量反转因子" if use_15day_factor else "原动量因子"
+    
+    print(f"\n=== 选股结果摘要 ({factor_type}) ===")
     print(f"选股时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"共选出{len(selected_stocks)}只股票")
-    print("\n排名  股票代码  股票名称      行业      价格    涨跌幅(%)  主力净流入(亿)  主力净占比(%)  动量得分")
-    print("-" * 100)
     
-    for i, stock in enumerate(selected_stocks, 1):
-        main_inflow_yi = stock.get('main_inflow', 0) / 1e8
-        print(f"{i:<4}  {stock.get('code', ''):<8}  {stock.get('name', ''):<10}  {stock.get('sector', ''):<8}  {stock.get('price', 0):<8.2f}  {stock.get('change_rate', 0):<9.2f}  {main_inflow_yi:<12.2f}  {stock.get('main_ratio', 0):<11.2f}  {stock.get('momentum_score', 0):<8.2f}")
+    if use_15day_factor:
+        print("\n排名  股票代码  股票名称      行业      价格    涨跌幅(%)  15天动量得分  原动量得分")
+        print("-" * 120)
+        
+        for i, stock in enumerate(selected_stocks, 1):
+            print(f"{i:<4}  {stock.get('code', ''):<8}  {stock.get('name', ''):<10}  {stock.get('sector', ''):<8}  {stock.get('price', 0):<8.2f}  {stock.get('change_rate', 0):<9.2f}  {stock.get('15day_momentum_score', 0):<12.2f}  {stock.get('old_momentum_score', 0):<10.2f}")
+    else:
+        print("\n排名  股票代码  股票名称      行业      价格    涨跌幅(%)  主力净流入(亿)  主力净占比(%)  超大单净流入(亿) 超大单净占比(%) 大单净流入(亿) 大单净占比(%) 动量得分")
+        print("-" * 150)
+        
+        for i, stock in enumerate(selected_stocks, 1):
+            main_inflow_yi = stock.get('main_inflow', 0) / 1e8
+            super_large_inflow_yi = stock.get('super_large_inflow', 0) / 1e8
+            large_inflow_yi = stock.get('large_inflow', 0) / 1e8
+            print(f"{i:<4}  {stock.get('code', ''):<8}  {stock.get('name', ''):<10}  {stock.get('sector', ''):<8}  {stock.get('price', 0):<8.2f}  {stock.get('change_rate', 0):<9.2f}  {main_inflow_yi:<12.2f}  {stock.get('main_ratio', 0):<11.2f}  {super_large_inflow_yi:<14.2f} {stock.get('super_large_ratio', 0):<12.2f} {large_inflow_yi:<12.2f} {stock.get('large_ratio', 0):<11.2f} {stock.get('momentum_score', 0):<8.2f}")
 
 def main():
     """
@@ -175,19 +395,31 @@ def main():
         print("无法加载股票数据，程序退出")
         return
     
-    # 执行选股
-    selected_stocks = select_stocks(data, top_n=10)
+    print("\n=== 使用原动量因子选股 ===")
+    # 执行原版选股
+    selected_stocks_old = select_stocks(data, top_n=10)
     
     # 生成报告
-    report = generate_selection_report(selected_stocks)
-    
-    # 保存结果
-    save_selection_result(report)
+    report_old = generate_selection_report(selected_stocks_old, use_15day_factor=False)
     
     # 打印摘要
-    print_selection_summary(selected_stocks)
+    print_selection_summary(selected_stocks_old, use_15day_factor=False)
+    
+    print("\n=== 使用15天动量反转因子选股 ===")
+    # 执行新版选股
+    selected_stocks_new = select_stocks_with_15day_factor(data, top_n=10)
+    
+    # 生成报告
+    report_new = generate_selection_report(selected_stocks_new, use_15day_factor=True)
+    
+    # 打印摘要
+    print_selection_summary(selected_stocks_new, use_15day_factor=True)
+    
+    # 保存合并结果到单个文件
+    save_combined_selection_result(report_old, report_new, 'selected_stocks.json')
     
     print("\n选股策略执行完成！")
+    print("选股结果已合并保存到: selected_stocks.json")
 
 if __name__ == "__main__":
     main()

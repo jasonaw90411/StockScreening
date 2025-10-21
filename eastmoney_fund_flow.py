@@ -1,7 +1,7 @@
 import os
 import json
 import subprocess
-from datetime import datetime
+from datetime import datetime, timedelta
 import requests
 import re
 from bs4 import BeautifulSoup
@@ -277,14 +277,94 @@ def extract_float_value(text):
             return 0.0
     return 0.0
 
+# 数据清洗函数
+def clean_stock_data(stock_info):
+    """
+    清洗和转换股票数据，确保数据格式正确
+    """
+    # 定义需要转换为浮点数的字段
+    float_fields = [
+        'price', 'change_rate', 'change_amount', 'volume', 'volume_amount',
+        'turnover_rate', 'volume_ratio', 'pe_ratio', 'pb_ratio', 
+        'market_cap', 'circulation_cap', 'high_price', 'low_price',
+        'open_price', 'pre_close_price', 'amplitude', 'main_inflow',
+        'main_ratio', 'super_large_inflow', 'super_large_ratio',
+        'large_inflow', 'large_ratio', 'rsi', 'ma5', 'ma10', 'ma20',
+        'ma30', 'ma60'
+    ]
+    
+    # 转换字段为浮点数，处理无效值
+    for field in float_fields:
+        if field in stock_info and stock_info[field] != '':
+            try:
+                # 处理特殊值（如-表示无数据）
+                if stock_info[field] in ['-', '--', 'None']:
+                    stock_info[field] = 0.0
+                else:
+                    value = float(stock_info[field])
+                    # 处理异常大的值（可能是时间戳）
+                    if value > 999999:  # 假设价格不会超过100万
+                        stock_info[field] = 0.0
+                    else:
+                        stock_info[field] = value
+            except (ValueError, TypeError):
+                stock_info[field] = 0.0
+        else:
+            stock_info[field] = 0.0
+    
+    # 计算一些衍生指标
+    try:
+        # 计算价格相对位置（当前价相对于高低价的位置）
+        if stock_info['high_price'] > stock_info['low_price']:
+            price_position = (stock_info['price'] - stock_info['low_price']) / (stock_info['high_price'] - stock_info['low_price'])
+            stock_info['price_position'] = round(price_position * 100, 2)
+        else:
+            stock_info['price_position'] = 50.0
+        
+        # 计算市值单位转换（万元转亿元）
+        stock_info['market_cap_billion'] = round(stock_info['market_cap'] / 10000, 2)
+        stock_info['circulation_cap_billion'] = round(stock_info['circulation_cap'] / 10000, 2)
+        
+        # 计算资金流向强度（主力净流入相对于流通市值的比例）
+        if stock_info['circulation_cap'] > 0:
+            fund_intensity = (stock_info['main_inflow'] / stock_info['circulation_cap']) * 100
+            stock_info['fund_intensity'] = round(fund_intensity, 4)
+        else:
+            stock_info['fund_intensity'] = 0.0
+        
+        # 计算量比状态（大于1为放量）
+        stock_info['volume_status'] = '放量' if stock_info['volume_ratio'] > 1 else '缩量'
+        
+        # 计算换手率状态
+        if stock_info['turnover_rate'] > 10:
+            stock_info['turnover_status'] = '高换手'
+        elif stock_info['turnover_rate'] > 5:
+            stock_info['turnover_status'] = '中换手'
+        else:
+            stock_info['turnover_status'] = '低换手'
+            
+    except Exception as e:
+        print(f"计算衍生指标时出错: {e}")
+        # 设置默认值
+        stock_info['price_position'] = 50.0
+        stock_info['market_cap_billion'] = 0.0
+        stock_info['circulation_cap_billion'] = 0.0
+        stock_info['fund_intensity'] = 0.0
+        stock_info['volume_status'] = '未知'
+        stock_info['turnover_status'] = '未知'
+    
+    return stock_info
+
 # 获取板块跳转URL
 def get_sector_stocks(sector_code, sector_name, limit=30):
     """
     获取板块中的个股数据，按资金流入排序
+    包含丰富的因子计算数据：成交量、量比、换手率、市盈率、市值等
     """
     # 东方财富板块个股API接口
     api_url = "http://push2.eastmoney.com/api/qt/clist/get"
     
+    # 扩展字段列表，包含更多用于因子计算的数据
     params = {
         'pn': 1,  # 页码
         'pz': limit,  # 每页数量
@@ -296,8 +376,8 @@ def get_sector_stocks(sector_code, sector_name, limit=30):
         'fid0': 'f62',  # 主力净流入
         'fid': 'f62',   # 按主力净流入排序
         'fs': f'b:{sector_code}',  # 板块代码
-        'fields': 'f12,f14,f2,f3,f62,f184,f66,f69,f72,f75,f78,f81,f84,f87,f204,f205,f124',
-        '_': '1697765264566'
+        'fields': 'f12,f14,f2,f3,f4,f5,f6,f7,f8,f9,f10,f11,f15,f16,f17,f18,f20,f21,f62,f66,f69,f72,f75,f116,f124,f125,f126,f127,f128',
+        '_': str(int(time.time() * 1000))
     }
     
     headers = {
@@ -306,6 +386,9 @@ def get_sector_stocks(sector_code, sector_name, limit=30):
     }
     
     try:
+        # 添加随机延迟避免请求过快
+        time.sleep(random.uniform(0.5, 2.0))
+        
         response = requests.get(api_url, params=params, headers=headers, timeout=10)
         response.raise_for_status()
         
@@ -314,21 +397,70 @@ def get_sector_stocks(sector_code, sector_name, limit=30):
         if data.get('data') and data['data'].get('diff'):
             stocks = []
             for stock in data['data']['diff']:
+                # 提取丰富的股票数据，包含各种因子计算所需字段
                 stock_info = {
+                    # 基础信息
                     'code': stock.get('f12', ''),  # 股票代码
                     'name': stock.get('f14', ''),  # 股票名称
                     'price': stock.get('f2', ''),   # 最新价
-                    'change_rate': stock.get('f3', ''),  # 涨跌幅
-                    'main_inflow': stock.get('f62', ''),  # 主力净流入
-                    'main_ratio': stock.get('f184', ''),  # 主力净占比
-                    'super_large_inflow': stock.get('f66', ''),  # 超大单净流入
-                    'large_inflow': stock.get('f72', ''),  # 大单净流入
-                    'medium_inflow': stock.get('f78', ''),  # 中单净流入
-                    'small_inflow': stock.get('f84', ''),  # 小单净流入
+                    'change_rate': stock.get('f3', ''),  # 涨跌幅(%)
+                    'change_amount': stock.get('f4', ''),  # 涨跌额
+                    
+                    # 成交量相关
+                    'volume': stock.get('f5', ''),  # 成交量(手)
+                    'volume_amount': stock.get('f6', ''),  # 成交额(万元)
+                    'turnover_rate': stock.get('f8', ''),  # 换手率(%)
+                    'volume_ratio': stock.get('f10', ''),  # 量比
+                    
+                    # 估值指标
+                    'pe_ratio': stock.get('f9', ''),  # 市盈率(动态)
+                    'pb_ratio': stock.get('f11', ''),  # 市净率
+                    'market_cap': stock.get('f20', ''),  # 总市值(万元)
+                    'circulation_cap': stock.get('f21', ''),  # 流通市值(万元)
+                    
+                    # 价格区间
+                    'high_price': stock.get('f15', ''),  # 最高价
+                    'low_price': stock.get('f16', ''),  # 最低价
+                    'open_price': stock.get('f17', ''),  # 开盘价
+                    'pre_close_price': stock.get('f18', ''),  # 昨收价
+                    
+                    # 振幅
+                    'amplitude': stock.get('f7', ''),  # 振幅(%)
+                    
+                    # 资金流向数据（核心数据，移除中单和小单）
+                    'main_inflow': stock.get('f62', ''),  # 主力净流入(万元)
+                    'main_ratio': stock.get('f184', ''),  # 主力净占比(%)
+                    'super_large_inflow': stock.get('f66', ''),  # 超大单净流入(万元)
+                    'super_large_ratio': stock.get('f69', ''),  # 超大单净占比(%)
+                    'large_inflow': stock.get('f72', ''),  # 大单净流入(万元)
+                    'large_ratio': stock.get('f75', ''),  # 大单净占比(%)
+                    
+                    # 技术指标
+                    'rsi': stock.get('f116', ''),  # RSI指标
+                    'ma5': stock.get('f124', ''),  # 5日均线
+                    'ma10': stock.get('f125', ''),  # 10日均线
+                    'ma20': stock.get('f126', ''),  # 20日均线
+                    'ma30': stock.get('f127', ''),  # 30日均线
+                    'ma60': stock.get('f128', ''),  # 60日均线
                 }
+                
+                # 数据清洗和转换
+                stock_info = clean_stock_data(stock_info)
                 stocks.append(stock_info)
             
+            # 调试输出：显示第一个股票的关键数据
+            if stocks:
+                first_stock = stocks[0]
+                print(f"调试 - 第一个股票数据:")
+                print(f"  股票: {first_stock['name']} ({first_stock['code']})")
+                print(f"  价格: {first_stock['price']}, 昨收: {first_stock['pre_close_price']}")
+                print(f"  MA5: {first_stock['ma5']}, MA10: {first_stock['ma10']}, MA20: {first_stock['ma20']}")
+                print(f"  MA30: {first_stock['ma30']}, MA60: {first_stock['ma60']}")
+                print(f"  RSI: {first_stock['rsi']}")
+                print(f"  主力净流入: {first_stock['main_inflow']}万元")
+            
             print(f"成功获取板块 '{sector_name}' 的 {len(stocks)} 只个股数据")
+            print(f"  数据字段包括: {list(stocks[0].keys()) if stocks else '无'}")
             return stocks
         else:
             print(f"未获取到板块 '{sector_name}' 的有效股票数据")
@@ -356,6 +488,9 @@ def get_sector_urls(top_sectors):
             'Upgrade-Insecure-Requests': '1',
             'Referer': 'https://data.eastmoney.com/',
         }
+        
+        # 添加随机延迟避免请求过快
+        time.sleep(random.uniform(1.0, 3.0))
         
         # 获取页面内容
         response = requests.get('https://data.eastmoney.com/bkzj/hy.html', headers=headers, timeout=15)
@@ -471,7 +606,31 @@ def generate_selected_stocks_html(selected_stocks):
     if not selected_stocks:
         return "<p>暂无选股结果</p>"
     
-    html = """
+    # 检查是否有15天动量得分字段，确定使用哪个标题和字段
+    has_15day_score = any('15day_momentum_score' in stock for stock in selected_stocks)
+    
+    if has_15day_score:
+        html = """
+    <div class="selected-stocks">
+        <h2>15天动量反转因子选股结果（前10名）</h2>
+        <table class="stocks-table">
+            <thead>
+                <tr>
+                    <th>排名</th>
+                    <th>股票代码</th>
+                    <th>股票名称</th>
+                    <th>所属行业</th>
+                    <th>价格</th>
+                    <th>涨跌幅(%)</th>
+                    <th>主力净流入(亿)</th>
+                    <th>15天动量得分</th>
+                    <th>原动量得分</th>
+                </tr>
+            </thead>
+            <tbody>
+    """
+    else:
+        html = """
     <div class="selected-stocks">
         <h2>动量反转因子选股结果（前10名）</h2>
         <table class="stocks-table">
@@ -484,7 +643,6 @@ def generate_selected_stocks_html(selected_stocks):
                     <th>价格</th>
                     <th>涨跌幅(%)</th>
                     <th>主力净流入(亿)</th>
-                    <th>主力净占比(%)</th>
                     <th>动量得分</th>
                 </tr>
             </thead>
@@ -506,7 +664,9 @@ def generate_selected_stocks_html(selected_stocks):
         ratio_class = "positive" if stock.get('main_ratio', 0) >= 0 else "negative"
         ratio_sign = "+" if stock.get('main_ratio', 0) >= 0 else ""
         
-        html += f"""
+        if has_15day_score:
+            # 使用新结构：包含15天动量得分和原动量得分
+            html += f"""
                 <tr>
                     <td>{stock.get('rank', '')}</td>
                     <td>{stock.get('code', '')}</td>
@@ -515,10 +675,24 @@ def generate_selected_stocks_html(selected_stocks):
                     <td>{stock.get('price', '')}</td>
                     <td class="{change_class}">{change_sign}{stock.get('change_rate', 0):.2f}</td>
                     <td class="{inflow_class}">{inflow_sign}{main_inflow_yi}</td>
-                    <td class="{ratio_class}">{ratio_sign}{stock.get('main_ratio', 0):.2f}</td>
+                    <td class="positive">{stock.get('15day_momentum_score', 0):.2f}</td>
+                    <td class="positive">{stock.get('old_momentum_score', 0):.2f}</td>
+                </tr>
+            """
+        else:
+            # 使用旧结构：只有动量得分
+            html += f"""
+                <tr>
+                    <td>{stock.get('rank', '')}</td>
+                    <td>{stock.get('code', '')}</td>
+                    <td>{stock.get('name', '')}</td>
+                    <td>{stock.get('sector', '')}</td>
+                    <td>{stock.get('price', '')}</td>
+                    <td class="{change_class}">{change_sign}{stock.get('change_rate', 0):.2f}</td>
+                    <td class="{inflow_class}">{inflow_sign}{main_inflow_yi}</td>
                     <td class="positive">{stock.get('momentum_score', 0):.2f}</td>
                 </tr>
-        """
+            """
     
     html += """
             </tbody>
@@ -537,7 +711,15 @@ def load_selected_stocks():
         try:
             with open(selected_stocks_file, 'r', encoding='utf-8') as f:
                 data = json.load(f)
-            return data.get('selected_stocks', [])
+            # 新的JSON结构包含两个因子类型的选股结果
+            # 优先显示15天动量反转因子的选股结果
+            if '15day_momentum_reversal_stocks' in data:
+                return data.get('15day_momentum_reversal_stocks', [])
+            # 如果新结构不存在，尝试旧结构
+            elif 'selected_stocks' in data:
+                return data.get('selected_stocks', [])
+            else:
+                return []
         except Exception as e:
             print(f"加载选股结果失败: {e}")
     return []
@@ -819,6 +1001,145 @@ def generate_all_sectors_table(all_sectors):
     
     return html
 
+# 获取股票历史价格数据
+def get_stock_history_prices(stock_code, days=15):
+    """
+    获取股票近N个交易日的收盘价数据
+    
+    Args:
+        stock_code: 股票代码（如：000001）
+        days: 获取的交易天数，默认15个交易日
+    
+    Returns:
+        list: 包含日期和收盘价的字典列表
+    """
+    # 东方财富历史数据API
+    # 对于A股，需要添加市场前缀：0-深市，1-沪市
+    if stock_code.startswith('6'):
+        market_code = '1'  # 沪市
+    else:
+        market_code = '0'  # 深市
+    
+    full_code = f"{market_code}.{stock_code}"
+    
+    # 计算开始日期（15个交易日前）
+    end_date = datetime.now()
+    start_date = end_date - timedelta(days=days * 2)  # 考虑非交易日，多取一些日期
+    
+    # 东方财富历史K线数据API
+    url = "http://push2his.eastmoney.com/api/qt/stock/kline/get"
+    
+    params = {
+        'secid': full_code,
+        'fields1': 'f1,f2,f3,f4,f5,f6',
+        'fields2': 'f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61',
+        'klt': '101',  # 日K线
+        'fqt': '1',    # 前复权
+        'beg': start_date.strftime('%Y%m%d'),
+        'end': end_date.strftime('%Y%m%d'),
+        'lmt': days + 10,  # 多取一些数据，确保有足够交易日
+        '_': str(int(time.time() * 1000))
+    }
+    
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
+        'Referer': 'https://quote.eastmoney.com/',
+    }
+    
+    try:
+        print(f"正在获取股票 {stock_code} 的历史价格数据...")
+        
+        # 添加随机延迟避免请求过快
+        time.sleep(random.uniform(0.5, 1.5))
+        
+        response = requests.get(url, params=params, headers=headers, timeout=10)
+        response.raise_for_status()
+        
+        data = response.json()
+        
+        if data.get('data') and data['data'].get('klines'):
+            history_prices = []
+            klines = data['data']['klines']
+            
+            # 解析K线数据
+            for kline in klines[:days]:  # 只取前N个交易日
+                parts = kline.split(',')
+                if len(parts) >= 2:
+                    date_str = parts[0]  # 日期
+                    close_price = float(parts[2])  # 收盘价
+                    
+                    history_prices.append({
+                        'date': date_str,
+                        'close_price': close_price
+                    })
+            
+            print(f"成功获取股票 {stock_code} 的 {len(history_prices)} 个交易日收盘价")
+            return history_prices
+        else:
+            print(f"未获取到股票 {stock_code} 的历史价格数据")
+            return []
+            
+    except Exception as e:
+        print(f"获取股票 {stock_code} 历史价格数据失败: {e}")
+        return []
+
+# 为股票数据添加历史价格信息
+def add_history_prices_to_stocks(stocks, days=15):
+    """
+    为股票列表中的每只股票添加历史价格数据
+    
+    Args:
+        stocks: 股票数据列表
+        days: 获取的历史交易日数
+    
+    Returns:
+        list: 包含历史价格数据的股票列表
+    """
+    if not stocks:
+        return stocks
+    
+    print(f"\n开始为 {len(stocks)} 只股票添加历史价格数据...")
+    
+    for i, stock in enumerate(stocks):
+        stock_code = stock.get('code', '')
+        if stock_code:
+            # 获取历史价格数据
+            history_prices = get_stock_history_prices(stock_code, days)
+            
+            # 添加到股票数据中
+            stock['history_prices'] = history_prices
+            
+            # 计算一些技术指标
+            if history_prices:
+                # 计算简单移动平均线
+                close_prices = [price['close_price'] for price in history_prices]
+                
+                # 5日移动平均线
+                if len(close_prices) >= 5:
+                    stock['ma5'] = sum(close_prices[:5]) / 5
+                
+                # 10日移动平均线
+                if len(close_prices) >= 10:
+                    stock['ma10'] = sum(close_prices[:10]) / 10
+                
+                # 计算涨跌幅
+                if len(close_prices) >= 2:
+                    latest_price = close_prices[0]
+                    prev_price = close_prices[1]
+                    stock['history_change_rate'] = ((latest_price - prev_price) / prev_price) * 100
+                
+                # 计算最高价和最低价
+                stock['history_high'] = max(close_prices) if close_prices else 0
+                stock['history_low'] = min(close_prices) if close_prices else 0
+                
+                print(f"  [{i+1}/{len(stocks)}] {stock['name']}({stock_code}) - 历史价格数据已添加")
+            
+            # 添加延迟避免请求过快
+            time.sleep(0.5)
+    
+    print("历史价格数据添加完成！")
+    return stocks
+
 # 主函数
 def main():
     print("开始爬取东方财富网板块资金流入数据...")
@@ -846,9 +1167,11 @@ def main():
                 print(f"正在获取 '{sector_name}' 板块的个股数据...")
                 stocks = get_sector_stocks(sector_code, sector_name, limit=30)
                 
+                # 为个股添加历史价格数据
                 if stocks:
-                    all_sector_stocks[sector_name] = stocks
-                    print(f"  成功获取 {len(stocks)} 只个股数据")
+                    stocks_with_history = add_history_prices_to_stocks(stocks, days=15)
+                    all_sector_stocks[sector_name] = stocks_with_history
+                    print(f"  成功获取 {len(stocks_with_history)} 只个股数据（包含历史价格）")
                 else:
                     print(f"  未能获取到个股数据")
                     all_sector_stocks[sector_name] = []
@@ -877,12 +1200,12 @@ def main():
                 url = sector.get('url', 'N/A')
                 stock_count = len(all_sector_stocks.get(sector['name'], []))
                 print(f"   {i}. {sector['name']} - 超大单流入: {sector['super_large_inflow']}亿, 大单流入: {sector['large_inflow']}亿, URL: {url}")
-                print(f"      个股数据: {stock_count} 只")
+                print(f"      个股数据: {stock_count} 只（包含15日历史价格）")
         else:
             print("   暂无符合条件的板块")
         
         total_stocks = sum(len(stocks) for stocks in all_sector_stocks.values())
-        print(f"2. 总共获取个股数据: {total_stocks} 只")
+        print(f"2. 总共获取个股数据: {total_stocks} 只（包含15日历史价格）")
         print(f"3. HTML报告已保存至: {html_file}")
         print(f"4. 详细数据已保存至: eastmoney_crawl_data.json")
     else:
