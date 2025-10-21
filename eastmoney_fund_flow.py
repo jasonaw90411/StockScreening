@@ -1,5 +1,6 @@
 import os
 import json
+import subprocess
 from datetime import datetime
 import requests
 import re
@@ -430,17 +431,127 @@ def save_crawl_data(all_sectors, top_sectors, sector_stocks=None):
         with open(json_filename, 'w', encoding='utf-8') as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
         print(f"爬取数据已保存到: {json_filename}")
+        
+        # 触发选股策略脚本
+        try:
+            print("正在执行选股策略...")
+            # 使用subprocess调用选股脚本
+            result = subprocess.run(['python', 'stock_selection_strategy.py'], 
+                                   capture_output=True, text=True)
+            print("选股策略输出:")
+            print(result.stdout)
+            if result.stderr:
+                print("选股策略错误:")
+                print(result.stderr)
+            print("选股策略执行完成")
+            
+            # 重新生成HTML报告以包含最新的选股结果
+            print("正在更新HTML报告以包含选股结果...")
+            # 重新加载top_sectors数据用于HTML生成
+            if os.path.exists(json_filename):
+                try:
+                    with open(json_filename, 'r', encoding='utf-8') as f:
+                        data = json.load(f)
+                    # 重新生成HTML报告
+                    generate_html_report(data.get('top_sectors', []), [])
+                except Exception as e:
+                    print(f"更新HTML报告失败: {e}")
+                    
+        except Exception as e:
+            print(f"执行选股策略时出错: {e}")
+            
     except Exception as e:
         print(f"保存数据失败: {e}")
 
 # 生成HTML页面
+def generate_selected_stocks_html(selected_stocks):
+    """
+    生成选股结果的HTML内容
+    """
+    if not selected_stocks:
+        return "<p>暂无选股结果</p>"
+    
+    html = """
+    <div class="selected-stocks">
+        <h2>动量反转因子选股结果（前10名）</h2>
+        <table class="stocks-table">
+            <thead>
+                <tr>
+                    <th>排名</th>
+                    <th>股票代码</th>
+                    <th>股票名称</th>
+                    <th>所属行业</th>
+                    <th>价格</th>
+                    <th>涨跌幅(%)</th>
+                    <th>主力净流入(亿)</th>
+                    <th>主力净占比(%)</th>
+                    <th>动量得分</th>
+                </tr>
+            </thead>
+            <tbody>
+    """
+    
+    for stock in selected_stocks:
+        # 格式化数据
+        main_inflow_yi = round(stock.get('main_inflow', 0) / 1e8, 2)
+        
+        # 判断涨跌幅的颜色类
+        change_class = "positive" if stock.get('change_rate', 0) >= 0 else "negative"
+        change_sign = "+" if stock.get('change_rate', 0) >= 0 else ""
+        
+        # 判断资金流入的颜色类
+        inflow_class = "positive" if main_inflow_yi >= 0 else "negative"
+        inflow_sign = "+" if main_inflow_yi >= 0 else ""
+        
+        ratio_class = "positive" if stock.get('main_ratio', 0) >= 0 else "negative"
+        ratio_sign = "+" if stock.get('main_ratio', 0) >= 0 else ""
+        
+        html += f"""
+                <tr>
+                    <td>{stock.get('rank', '')}</td>
+                    <td>{stock.get('code', '')}</td>
+                    <td>{stock.get('name', '')}</td>
+                    <td>{stock.get('sector', '')}</td>
+                    <td>{stock.get('price', '')}</td>
+                    <td class="{change_class}">{change_sign}{stock.get('change_rate', 0):.2f}</td>
+                    <td class="{inflow_class}">{inflow_sign}{main_inflow_yi}</td>
+                    <td class="{ratio_class}">{ratio_sign}{stock.get('main_ratio', 0):.2f}</td>
+                    <td class="positive">{stock.get('momentum_score', 0):.2f}</td>
+                </tr>
+        """
+    
+    html += """
+            </tbody>
+        </table>
+    </div>
+    """
+    
+    return html
+
+def load_selected_stocks():
+    """
+    加载选股结果
+    """
+    selected_stocks_file = 'selected_stocks.json'
+    if os.path.exists(selected_stocks_file):
+        try:
+            with open(selected_stocks_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            return data.get('selected_stocks', [])
+        except Exception as e:
+            print(f"加载选股结果失败: {e}")
+    return []
+
 def generate_html_report(top_sectors, all_sectors):
     """
     生成HTML报告页面
-    显示超大单和大单都是净流入的前三个板块
+    显示超大单和大单都是净流入的前三个板块以及选股结果
     """
     html_filename = 'eastmoney_fund_flow_report.html'
     crawl_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    
+    # 加载选股结果
+    selected_stocks = load_selected_stocks()
     
     html_content = f"""
     <!DOCTYPE html>
@@ -467,6 +578,12 @@ def generate_html_report(top_sectors, all_sectors):
                 border-bottom: 1px solid #e0e0e0;
                 font-size: 1.5em;
             }}
+            h2 {{
+                color: #2c3e50;
+                margin-top: 20px;
+                margin-bottom: 15px;
+                font-size: 1.3em;
+            }}
             .update-time {{
                 text-align: center;
                 color: #666;
@@ -480,6 +597,14 @@ def generate_html_report(top_sectors, all_sectors):
                 padding: 15px;
                 margin-bottom: 15px;
                 box-shadow: 0 1px 5px rgba(0, 0, 0, 0.1);
+            }}
+            .selected-stocks {{
+                background-color: #fff;
+                border-radius: 6px;
+                padding: 15px;
+                margin-bottom: 15px;
+                box-shadow: 0 1px 5px rgba(0, 0, 0, 0.1);
+                border-left: 4px solid #007bff;
             }}
             .sector-card {{
                 background-color: #f8f9fa;
@@ -560,6 +685,14 @@ def generate_html_report(top_sectors, all_sectors):
             .negative {{
                 color: #dc3545;
             }}
+            /* 响应式表格 */
+            @media (max-width: 768px) {{
+                .stocks-table {{
+                    display: block;
+                    overflow-x: auto;
+                    white-space: nowrap;
+                }}
+            }}
         </style>
     </head>
     <body>
@@ -570,6 +703,8 @@ def generate_html_report(top_sectors, all_sectors):
             <h2>主力净流入前五个板块</h2>
             {generate_top_sectors_html(top_sectors)}
         </div>
+        
+        {generate_selected_stocks_html(selected_stocks)}
     </body>
     </html>
     """
