@@ -18,17 +18,17 @@ def crawl_eastmoney_fund_flow(max_retries=3):
     URL: https://data.eastmoney.com/bkzj/hy.html
     获取今日超大单和大单都是净流入的前三个板块
     """
-    url = "https://data.eastmoney.com/bkzj/hy.html"
+    # 主要使用API方式，同时保留HTML解析作为备选
+    api_url = "http://push2.eastmoney.com/api/qt/clist/get"
+    html_url = "https://data.eastmoney.com/bkzj/hy.html"
     
     # 模拟浏览器请求头 - 使用更现代的浏览器UA
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+        'Accept': '*/*',
         'Accept-Language': 'zh-CN,zh;q=0.9',
-        'Accept-Encoding': 'gzip, deflate, br',
         'Connection': 'keep-alive',
-        'Upgrade-Insecure-Requests': '1',
-        'Referer': 'https://data.eastmoney.com/',
+        'Referer': 'https://data.eastmoney.com/bkzj/hy.html',
     }
     
     for attempt in range(max_retries):
@@ -37,44 +37,102 @@ def crawl_eastmoney_fund_flow(max_retries=3):
             time.sleep(random.uniform(1, 3))
             
             print(f"第{attempt + 1}次尝试获取东方财富网板块资金流入数据...")
-            response = requests.get(url, headers=headers, timeout=15)
+            
+            # 方法1: 直接调用API获取数据（推荐方法）
+            print("方法1: 尝试直接调用东方财富网API...")
+            # 东方财富网板块资金流向API参数
+            params = {
+                'pn': 1,  # 页码
+                'pz': 100,  # 每页数量
+                'po': 1,  # 排序方式
+                'np': 1,
+                'ut': 'bd1d9ddb04089700cf9c27f6f7426281',
+                'fltt': 2,  # 过滤条件
+                'invt': 2,
+                'fid': 'f62',  # 按主力净流入排序
+                'fs': 'm:90 t:2',  # 板块类型：行业板块
+                'fields': 'f1,f14,f62,f66,f69,f72,f75,f184,f128,f136',  # 所需字段
+                '_': str(int(time.time() * 1000))  # 时间戳防止缓存
+            }
+            
+            response = requests.get(api_url, params=params, headers=headers, timeout=15)
             response.raise_for_status()
             
-            # 解析页面
-            soup = BeautifulSoup(response.text, 'html.parser')
+            print(f"API响应状态码: {response.status_code}")
             
-            # 打印页面中包含的div和table信息，用于调试
-            print(f"页面中div数量: {len(soup.find_all('div'))}")
-            print(f"页面中table数量: {len(soup.find_all('table'))}")
+            # 解析API响应
+            data = response.json()
+            all_sectors = []
             
-            # 方法1: 直接查找包含数据的表格
-            all_sectors = extract_data_from_tables(soup)
+            if data.get('data') and data['data'].get('diff'):
+                print(f"API响应数据字段: {list(data['data']['diff'][0].keys()) if data['data']['diff'] else '无数据'}")
+                
+                for item in data['data']['diff']:
+                    try:
+                        sector_data = {
+                            'name': item.get('f14', '未知'),  # 板块名称
+                            'change_rate': float(item.get('f3', 0)),  # 涨跌幅
+                            'super_large_inflow': float(item.get('f66', 0)) / 10000,  # 超大单净流入（转换为亿元）
+                            'super_large_ratio': float(item.get('f69', 0)),  # 超大单净占比
+                            'large_inflow': float(item.get('f72', 0)) / 10000,  # 大单净流入（转换为亿元）
+                            'large_ratio': float(item.get('f75', 0)),  # 大单净占比
+                            'max_stock': item.get('f128', '未知')  # 主力净流入最大股
+                        }
+                        
+                        all_sectors.append(sector_data)
+                        
+                        # 只打印前5个用于调试
+                        if len(all_sectors) <= 5:
+                            print(f"API提取板块数据: {sector_data['name']}, 超大单流入: {sector_data['super_large_inflow']}亿, 大单流入: {sector_data['large_inflow']}亿")
+                    
+                    except (ValueError, TypeError, KeyError) as e:
+                        print(f"解析API数据项失败: {e}, 数据项: {item}")
+                        continue
             
-            # 如果方法1失败，尝试方法2: 从页面文本中提取数据
-            if len(all_sectors) < 5:  # 如果提取的数据太少，尝试另一种方法
-                print("尝试从页面文本中提取数据...")
-                all_sectors = extract_data_from_page_text(response.text)
-            
-            # 方法3: 使用pandas读取表格
-            if len(all_sectors) < 5:
-                print("尝试使用pandas读取表格...")
-                try:
-                    tables = pd.read_html(StringIO(response.text))
-                    for i, table in enumerate(tables):
-                        print(f"Pandas找到表格{i+1}，形状: {table.shape}")
-                        # 尝试处理表格数据
-                        if table.shape[0] > 10 and table.shape[1] > 8:  # 合理大小的表格
-                            sectors_from_pandas = process_pandas_table(table)
-                            if sectors_from_pandas:
-                                all_sectors = sectors_from_pandas
-                                break
-                except Exception as e:
-                    print(f"Pandas读取表格失败: {e}")
-            
-            # 如果还是没有数据，直接返回空列表
-            if len(all_sectors) < 5:
-                print("无法从页面获取足够数据，爬虫失败")
-                return [], []
+            # 如果API调用成功且获取到足够数据，继续处理
+            if len(all_sectors) >= 5:
+                print(f"API成功获取到{len(all_sectors)}个板块数据")
+            else:
+                print(f"API获取数据不足，尝试HTML解析方式...")
+                # API失败时，尝试HTML解析方式
+                response = requests.get(html_url, headers=headers, timeout=15)
+                response.raise_for_status()
+                
+                # 解析页面
+                soup = BeautifulSoup(response.text, 'html.parser')
+                
+                # 打印页面中包含的div和table信息，用于调试
+                print(f"页面中div数量: {len(soup.find_all('div'))}")
+                print(f"页面中table数量: {len(soup.find_all('table'))}")
+                
+                # 方法1: 直接查找包含数据的表格
+                all_sectors = extract_data_from_tables(soup)
+                
+                # 如果方法1失败，尝试方法2: 从页面文本中提取数据
+                if len(all_sectors) < 5:  # 如果提取的数据太少，尝试另一种方法
+                    print("尝试从页面文本中提取数据...")
+                    all_sectors = extract_data_from_page_text(response.text)
+                
+                # 方法3: 使用pandas读取表格
+                if len(all_sectors) < 5:
+                    print("尝试使用pandas读取表格...")
+                    try:
+                        tables = pd.read_html(StringIO(response.text))
+                        for i, table in enumerate(tables):
+                            print(f"Pandas找到表格{i+1}，形状: {table.shape}")
+                            # 尝试处理表格数据
+                            if table.shape[0] > 10 and table.shape[1] > 8:  # 合理大小的表格
+                                sectors_from_pandas = process_pandas_table(table)
+                                if sectors_from_pandas:
+                                    all_sectors = sectors_from_pandas
+                                    break
+                    except Exception as e:
+                        print(f"Pandas读取表格失败: {e}")
+                
+                # 如果还是没有数据，直接返回空列表
+                if len(all_sectors) < 5:
+                    print("无法从页面获取足够数据，爬虫失败")
+                    return [], []
             
             print(f"总共提取到{len(all_sectors)}个板块数据")
             
@@ -356,114 +414,141 @@ def get_sector_stocks(sector_code, sector_name, limit=30):
     获取板块中的个股数据，按资金流入排序
     包含丰富的因子计算数据：成交量、量比、换手率、市盈率、市值等
     """
-    # 东方财富板块个股API接口
-    api_url = "http://push2.eastmoney.com/api/qt/clist/get"
+    print(f"[函数调用] get_sector_stocks(sector_code={sector_code}, sector_name={sector_name}, limit={limit})")
     
-    # 扩展字段列表，包含更多用于因子计算的数据
-    params = {
-        'pn': 1,  # 页码
-        'pz': limit,  # 每页数量
-        'po': 1,  # 排序方式
-        'np': 1,
-        'ut': 'bd1d9ddb04089700cf9c27f6f7426281',
-        'fltt': 2,
-        'invt': 2,
-        'fid0': 'f62',  # 主力净流入
-        'fid': 'f62',   # 按主力净流入排序
-        'fs': f'b:{sector_code}',  # 板块代码
-        'fields': 'f12,f14,f2,f3,f4,f5,f6,f7,f8,f9,f10,f11,f15,f16,f17,f18,f20,f21,f62,f66,f69,f72,f75,f116,f124,f125,f126,f127,f128',
-        '_': str(int(time.time() * 1000))
-    }
+    # 尝试不同的API端点
+    api_endpoints = [
+        "http://push2.eastmoney.com/api/qt/clist/get",
+        "http://60.push2.eastmoney.com/api/qt/clist/get",
+    ]
     
+    # 尝试不同的过滤条件格式
+    fs_param_variations = [
+        f'b:{sector_code}',
+        f'b:BK{sector_code}',
+        f'm:90 t:2 f:BK{sector_code}',
+    ]
+    
+    # 模拟浏览器请求头
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
-        'Referer': 'https://data.eastmoney.com/',
+        'Accept': '*/*',
+        'Accept-Language': 'zh-CN,zh;q=0.9',
+        'Connection': 'keep-alive',
+        'Referer': f'https://data.eastmoney.com/bkzj/{sector_code}.html',
     }
     
-    try:
-        # 添加随机延迟避免请求过快
-        time.sleep(random.uniform(0.5, 2.0))
-        
-        response = requests.get(api_url, params=params, headers=headers, timeout=10)
-        response.raise_for_status()
-        
-        data = response.json()
-        
-        if data.get('data') and data['data'].get('diff'):
-            stocks = []
-            for stock in data['data']['diff']:
-                # 提取丰富的股票数据，包含各种因子计算所需字段
-                stock_info = {
-                    # 基础信息
-                    'code': stock.get('f12', ''),  # 股票代码
-                    'name': stock.get('f14', ''),  # 股票名称
-                    'price': stock.get('f2', ''),   # 最新价
-                    'change_rate': stock.get('f3', ''),  # 涨跌幅(%)
-                    'change_amount': stock.get('f4', ''),  # 涨跌额
-                    
-                    # 成交量相关
-                    'volume': stock.get('f5', ''),  # 成交量(手)
-                    'volume_amount': stock.get('f6', ''),  # 成交额(万元)
-                    'turnover_rate': stock.get('f8', ''),  # 换手率(%)
-                    'volume_ratio': stock.get('f10', ''),  # 量比
-                    
-                    # 估值指标
-                    'pe_ratio': stock.get('f9', ''),  # 市盈率(动态)
-                    'pb_ratio': stock.get('f11', ''),  # 市净率
-                    'market_cap': stock.get('f20', ''),  # 总市值(万元)
-                    'circulation_cap': stock.get('f21', ''),  # 流通市值(万元)
-                    
-                    # 价格区间
-                    'high_price': stock.get('f15', ''),  # 最高价
-                    'low_price': stock.get('f16', ''),  # 最低价
-                    'open_price': stock.get('f17', ''),  # 开盘价
-                    'pre_close_price': stock.get('f18', ''),  # 昨收价
-                    
-                    # 振幅
-                    'amplitude': stock.get('f7', ''),  # 振幅(%)
-                    
-                    # 资金流向数据（核心数据，移除中单和小单）
-                    'main_inflow': stock.get('f62', ''),  # 主力净流入(万元)
-                    'main_ratio': stock.get('f184', ''),  # 主力净占比(%)
-                    'super_large_inflow': stock.get('f66', ''),  # 超大单净流入(万元)
-                    'super_large_ratio': stock.get('f69', ''),  # 超大单净占比(%)
-                    'large_inflow': stock.get('f72', ''),  # 大单净流入(万元)
-                    'large_ratio': stock.get('f75', ''),  # 大单净占比(%)
-                    
-                    # 技术指标
-                    'rsi': stock.get('f116', ''),  # RSI指标
-                    'ma5': stock.get('f124', ''),  # 5日均线
-                    'ma10': stock.get('f125', ''),  # 10日均线
-                    'ma20': stock.get('f126', ''),  # 20日均线
-                    'ma30': stock.get('f127', ''),  # 30日均线
-                    'ma60': stock.get('f128', ''),  # 60日均线
+    # 字段列表 - 确保包含所有需要的数据
+    fields = 'f12,f14,f2,f3,f4,f5,f6,f7,f8,f9,f10,f11,f15,f16,f17,f18,f20,f21,f62,f66,f69,f72,f75,f128,f136,f152'
+    
+    # 尝试所有API端点和过滤条件组合
+    for api_url in api_endpoints:
+        for fs_param in fs_param_variations:
+            try:
+                # 添加随机延迟避免请求过快
+                time.sleep(random.uniform(0.5, 2.0))
+                
+                print(f"尝试API: {api_url}, 过滤条件: {fs_param}")
+                
+                # 构建API参数
+                params = {
+                    'pn': 1,  # 页码
+                    'pz': limit,  # 每页数量
+                    'po': 1,  # 排序方式
+                    'np': 1,
+                    'ut': 'bd1d9ddb04089700cf9c27f6f7426281',
+                    'fltt': 2,  # 过滤条件
+                    'invt': 2,
+                    'fid': 'f62',  # 按主力净流入排序
+                    'fs': fs_param,  # 板块过滤条件
+                    'fields': fields,
+                    '_': str(int(time.time() * 1000))  # 时间戳防止缓存
                 }
                 
-                # 数据清洗和转换
-                stock_info = clean_stock_data(stock_info)
-                stocks.append(stock_info)
-            
-            # 调试输出：显示第一个股票的关键数据
-            if stocks:
-                first_stock = stocks[0]
-                print(f"调试 - 第一个股票数据:")
-                print(f"  股票: {first_stock['name']} ({first_stock['code']})")
-                print(f"  价格: {first_stock['price']}, 昨收: {first_stock['pre_close_price']}")
-                print(f"  MA5: {first_stock['ma5']}, MA10: {first_stock['ma10']}, MA20: {first_stock['ma20']}")
-                print(f"  MA30: {first_stock['ma30']}, MA60: {first_stock['ma60']}")
-                print(f"  RSI: {first_stock['rsi']}")
-                print(f"  主力净流入: {first_stock['main_inflow']}万元")
-            
-            print(f"成功获取板块 '{sector_name}' 的 {len(stocks)} 只个股数据")
-            print(f"  数据字段包括: {list(stocks[0].keys()) if stocks else '无'}")
-            return stocks
-        else:
-            print(f"未获取到板块 '{sector_name}' 的有效股票数据")
-            return []
+                response = requests.get(api_url, params=params, headers=headers, timeout=15)
+                response.raise_for_status()
+                
+                print(f"API响应状态码: {response.status_code}")
+                
+                data = response.json()
+                
+                # 检查API响应结构
+                if not data.get('data'):
+                    print(f"API响应缺少data字段: {data.keys()}")
+                    continue
+                    
+                if not data['data'].get('diff'):
+                    print(f"API响应data中缺少diff字段: {data['data'].keys() if 'data' in data else '无'}")
+                    continue
+                
+                # 解析股票数据
+                stocks = []
+                diff_data = data['data']['diff']
+                print(f"获取到{len(diff_data)}条股票数据")
+                
+                # 打印第一条数据的字段，用于调试
+                if diff_data:
+                    print(f"第一条数据的字段: {list(diff_data[0].keys())}")
+                
+                for stock in diff_data:
+                    try:
+                        # 提取股票数据
+                        stock_info = {
+                            # 基础信息
+                            'code': stock.get('f12', ''),  # 股票代码
+                            'name': stock.get('f14', ''),  # 股票名称
+                            'price': stock.get('f2', 0),   # 最新价
+                            'change_rate': stock.get('f3', 0),  # 涨跌幅(%)
+                            'change_amount': stock.get('f4', 0),  # 涨跌额
+                            
+                            # 成交量相关
+                            'volume': stock.get('f5', 0),  # 成交量(手)
+                            'amount': stock.get('f6', 0),  # 成交额(元)
+                            'turnover_rate': stock.get('f8', 0),  # 换手率(%)
+                            'volume_ratio': stock.get('f10', 0),  # 量比
+                            
+                            # 估值指标
+                            'pe_ratio': stock.get('f9', 0),  # 市盈率
+                            'pb_ratio': stock.get('f11', 0),  # 市净率
+                            'market_cap': stock.get('f20', 0),  # 总市值
+                            'circulation_cap': stock.get('f21', 0),  # 流通市值
+                            
+                            # 资金流向数据
+                            'main_inflow': float(stock.get('f62', 0)) / 10000,  # 主力净流入(亿元)
+                            'main_ratio': float(stock.get('f128', 0)) if stock.get('f128') != '-' else 0,  # 主力净占比
+                            'super_large_inflow': float(stock.get('f66', 0)) / 10000,  # 超大单净流入(亿元)
+                            'super_large_ratio': float(stock.get('f69', 0)) if stock.get('f69') != '-' else 0,  # 超大单净占比
+                            'large_inflow': float(stock.get('f72', 0)) / 10000,  # 大单净流入(亿元)
+                            'large_ratio': float(stock.get('f75', 0)) if stock.get('f75') != '-' else 0,  # 大单净占比
+                        }
+                        
+                        # 确保代码和名称不为空
+                        if stock_info['code'] and stock_info['name']:
+                            # 数据清洗和转换
+                            stock_info = clean_stock_data(stock_info)
+                            stocks.append(stock_info)
+                            
+                            # 打印前5只股票信息
+                            if len(stocks) <= 5:
+                                print(f"股票数据: {stock_info['name']}({stock_info['code']}), 主力净流入: {stock_info['main_inflow']}亿")
+                    
+                    except (ValueError, TypeError, KeyError) as e:
+                        print(f"解析股票数据失败: {e}, 股票数据: {stock}")
+                        continue
+                
+                # 如果获取到足够的数据，返回结果
+                if stocks:
+                    print(f"成功获取板块 '{sector_name}' 的 {len(stocks)} 只个股数据")
+                    return stocks
+                
+            except Exception as e:
+                print(f"使用API端点{api_url}和过滤条件{fs_param}获取数据失败: {e}")
+                # 继续尝试下一个组合
+                continue
     
-    except Exception as e:
-        print(f"获取板块 '{sector_name}' 个股数据失败: {e}")
-        return []
+    # 如果所有API调用都失败，返回空列表
+    print(f"所有API调用都失败，未能获取板块 '{sector_name}' 的个股数据")
+    return []
 
 def get_sector_urls(top_sectors):
     """
@@ -1158,7 +1243,7 @@ def main():
                 
                 # 添加延迟避免请求过快
                 import time
-                time.sleep(1)
+                time.sleep(2)
             else:
                 print(f"  无法从URL中提取板块代码: {sector_url}")
                 all_sector_stocks[sector_name] = []
