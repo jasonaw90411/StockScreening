@@ -70,10 +70,10 @@ def crawl_eastmoney_fund_flow(max_retries=3):
                 except Exception as e:
                     print(f"Pandas读取表格失败: {e}")
             
-            # 如果还是没有数据，使用模拟数据（用于演示）
+            # 如果还是没有数据，直接返回空列表
             if len(all_sectors) < 5:
-                print("无法从页面获取足够数据，使用模拟数据...")
-                all_sectors = generate_mock_sector_data()
+                print("无法从页面获取足够数据，爬虫失败")
+                return [], []
             
             print(f"总共提取到{len(all_sectors)}个板块数据")
             
@@ -99,14 +99,8 @@ def crawl_eastmoney_fund_flow(max_retries=3):
             if attempt < max_retries - 1:
                 time.sleep(random.uniform(3, 5))  # 失败时等待更长时间
             else:
-                print("最终未能获取东方财富网板块资金流入数据，使用模拟数据")
-                # 使用模拟数据作为备选
-                all_sectors = generate_mock_sector_data()
-                # 按主力净流入（超大单+大单）排序
-                all_sectors.sort(key=lambda x: (x['super_large_inflow'] + x['large_inflow']), reverse=True)
-                top_sectors = all_sectors[:5]
-                save_crawl_data(all_sectors, top_sectors)
-                return top_sectors, all_sectors
+                print("最终未能获取东方财富网板块资金流入数据，爬虫失败")
+                return [], []
     
     return [], []
 
@@ -528,22 +522,7 @@ def get_sector_urls(top_sectors):
     
     return sectors_with_urls
 
-# 生成模拟数据（用于演示）
-def generate_mock_sector_data():
-    """生成模拟的板块资金流向数据"""
-    mock_sectors = [
-        {'name': '通信设备', 'change_rate': 1.93, 'super_large_inflow': 64.13, 'super_large_ratio': 5.58, 'large_inflow': 3.76, 'large_ratio': 0.33, 'max_stock': '新易盛'},
-        {'name': '电子元件', 'change_rate': 3.06, 'super_large_inflow': 51.75, 'super_large_ratio': 5.65, 'large_inflow': 7.05, 'large_ratio': 0.77, 'max_stock': '胜宏科技'},
-        {'name': '消费电子', 'change_rate': 2.78, 'super_large_inflow': 39.90, 'super_large_ratio': 4.59, 'large_inflow': 1.88, 'large_ratio': 0.22, 'max_stock': '工业富联'},
-        {'name': '半导体', 'change_rate': 2.22, 'super_large_inflow': 54.74, 'super_large_ratio': 3.03, 'large_inflow': -16.87, 'large_ratio': -0.93, 'max_stock': '中芯国际'},
-        {'name': '计算机设备', 'change_rate': 2.01, 'super_large_inflow': 12.83, 'super_large_ratio': 5.10, 'large_inflow': 2.57, 'large_ratio': 1.02, 'max_stock': '中科曙光'},
-        {'name': '汽车零部件', 'change_rate': 1.77, 'super_large_inflow': 6.77, 'super_large_ratio': 1.12, 'large_inflow': 6.77, 'large_ratio': 1.12, 'max_stock': '拓普集团'},
-        {'name': '专用设备', 'change_rate': 2.47, 'super_large_inflow': 13.81, 'super_large_ratio': 2.29, 'large_inflow': -3.55, 'large_ratio': -0.06, 'max_stock': '天桥起重'},
-        {'name': '工程建设', 'change_rate': 2.64, 'super_large_inflow': 14.80, 'super_large_ratio': 6.30, 'large_inflow': -1.66, 'large_ratio': -0.71, 'max_stock': '太极实业'},
-        {'name': '证券', 'change_rate': 1.03, 'super_large_inflow': 3.31, 'super_large_ratio': 0.69, 'large_inflow': 8.12, 'large_ratio': 1.69, 'max_stock': '天风证券'},
-        {'name': '工程机械', 'change_rate': 3.65, 'super_large_inflow': 9.34, 'super_large_ratio': 7.69, 'large_inflow': 1.18, 'large_ratio': 0.97, 'max_stock': '山河智能'}
-    ]
-    return mock_sectors
+
 
 # 保存爬取的数据到JSON文件
 def save_crawl_data(all_sectors, top_sectors, sector_stocks=None):
