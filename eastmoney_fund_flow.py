@@ -866,7 +866,6 @@ def generate_selected_stocks_html(selected_stocks):
                     <th>动量得分</th>
                     <th>趋势得分</th>
                     <th>成交量因子</th>
-                    <th>资金流因子</th>
                 </tr>
             </thead>
             <tbody>
@@ -938,7 +937,6 @@ def generate_selected_stocks_html(selected_stocks):
                     <td class="positive">{stock.get('phase_momentum_score', 0):.2f}</td>
                     <td class="positive">{stock.get('phase_trend_score', 0):.2f}</td>
                     <td class="positive">{stock.get('phase_volume_factor', 0):.2f}</td>
-                    <td class="positive">{stock.get('phase_fund_flow_factor', 0):.2f}</td>
                 </tr>
             """
         elif has_15day_score:

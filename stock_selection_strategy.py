@@ -10,28 +10,25 @@ PHASE_CONFIG = {
     "上涨阶段": {
         "description": "市场处于上涨趋势，适合动量策略",
         "weights": {
-            "momentum_factor": 0.4,      # 动量因子权重
-            "trend_factor": 0.3,        # 趋势因子权重
-            "volume_factor": 0.15,      # 成交量因子权重
-            "fund_flow_factor": 0.15    # 资金流向因子权重
+            "momentum_factor": 0.5,      # 动量因子权重
+            "trend_factor": 0.35,        # 趋势因子权重
+            "volume_factor": 0.15      # 成交量因子权重
         }
     },
     "震荡阶段": {
         "description": "市场处于震荡整理，适合反转策略",
         "weights": {
-            "momentum_factor": 0.2,      # 动量因子权重
-            "trend_factor": 0.25,       # 趋势因子权重
-            "volume_factor": 0.25,      # 成交量因子权重
-            "fund_flow_factor": 0.3     # 资金流向因子权重
+            "momentum_factor": 0.35,     # 动量因子权重
+            "trend_factor": 0.35,       # 趋势因子权重
+            "volume_factor": 0.3      # 成交量因子权重
         }
     },
     "下跌阶段": {
         "description": "市场处于下跌趋势，适合防御性策略",
         "weights": {
-            "momentum_factor": 0.15,     # 动量因子权重
-            "trend_factor": 0.35,       # 趋势因子权重
-            "volume_factor": 0.2,       # 成交量因子权重
-            "fund_flow_factor": 0.3     # 资金流向因子权重
+            "momentum_factor": 0.25,     # 动量因子权重
+            "trend_factor": 0.45,       # 趋势因子权重
+            "volume_factor": 0.3      # 成交量因子权重
         }
     }
 }
@@ -447,24 +444,17 @@ def select_stocks_with_phase(stock_data, phase_type="上涨阶段", top_n=10):
         if volume_ratio > 3.0:
             volume_factor = 2.0 + (volume_ratio - 3.0) * 0.2
         
-        # 计算资金流向因子
-        main_inflow = stock.get('main_inflow', 0)
-        main_ratio = stock.get('main_ratio', 0)
-        fund_flow_factor = 0.6 * (main_inflow / 1e8) + 0.4 * main_ratio
-        
-        # 应用阶段权重计算综合得分
+        # 应用阶段权重计算综合得分（移除资金流向因子）
         composite_score = (
             momentum_score * weights['momentum_factor'] +
             trend_score * weights['trend_factor'] +
-            volume_factor * 20 * weights['volume_factor'] +  # 放大成交量因子
-            fund_flow_factor * 20 * weights['fund_flow_factor']  # 放大资金流向因子
+            volume_factor * 20 * weights['volume_factor']  # 成交量因子
         )
         
         # 存储各个因子得分和综合得分
         stock['phase_momentum_score'] = momentum_score
         stock['phase_trend_score'] = trend_score
         stock['phase_volume_factor'] = volume_factor
-        stock['phase_fund_flow_factor'] = fund_flow_factor
         stock['phase_composite_score'] = composite_score
         stock['phase_type'] = phase_type
     
@@ -518,7 +508,7 @@ def generate_selection_report(selected_stocks, use_15day_factor=False, phase_typ
             stock_report['phase_momentum_score'] = stock.get('phase_momentum_score', 0)
             stock_report['phase_trend_score'] = stock.get('phase_trend_score', 0)
             stock_report['phase_volume_factor'] = stock.get('phase_volume_factor', 0)
-            stock_report['phase_fund_flow_factor'] = stock.get('phase_fund_flow_factor', 0)
+
         elif use_15day_factor:
             stock_report['15day_momentum_score'] = stock.get('15day_momentum_score', 0)
             stock_report['old_momentum_score'] = stock.get('old_momentum_score', 0)
@@ -586,11 +576,11 @@ def print_selection_summary(selected_stocks, use_15day_factor=False, phase_type=
     print(f"共选出{len(selected_stocks)}只股票")
     
     if phase_type:
-        print("\n排名  股票代码  股票名称      行业      价格    涨跌幅(%)  综合得分  动量得分  趋势得分  成交量因子  资金流向因子")
-        print("-" * 150)
+        print("\n排名  股票代码  股票名称      行业      价格    涨跌幅(%)  综合得分  动量得分  趋势得分  成交量因子")
+        print("-" * 130)
         
         for i, stock in enumerate(selected_stocks, 1):
-            print(f"{i:<4}  {stock.get('code', ''):<8}  {stock.get('name', ''):<10}  {stock.get('sector', ''):<8}  {stock.get('price', 0):<8.2f}  {stock.get('change_rate', 0):<9.2f}  {stock.get('phase_composite_score', 0):<8.2f}  {stock.get('phase_momentum_score', 0):<8.2f}  {stock.get('phase_trend_score', 0):<8.2f}  {stock.get('phase_volume_factor', 0):<10.2f}  {stock.get('phase_fund_flow_factor', 0):<12.2f}")
+            print(f"{i:<4}  {stock.get('code', ''):<8}  {stock.get('name', ''):<10}  {stock.get('sector', ''):<8}  {stock.get('price', 0):<8.2f}  {stock.get('change_rate', 0):<9.2f}  {stock.get('phase_composite_score', 0):<8.2f}  {stock.get('phase_momentum_score', 0):<8.2f}  {stock.get('phase_trend_score', 0):<8.2f}  {stock.get('phase_volume_factor', 0):<10.2f}")
     elif use_15day_factor:
         print("\n排名  股票代码  股票名称      行业      价格    涨跌幅(%)  15天动量得分  原动量得分")
         print("-" * 120)
