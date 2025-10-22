@@ -844,10 +844,11 @@ def generate_selected_stocks_html(selected_stocks):
     if not selected_stocks:
         return "<p>暂无选股结果</p>"
     
-    # 检查是否有15天动量得分字段，确定使用哪个标题和字段
+    # 检查是否有阶段选股得分字段，确定使用哪个标题和字段
+    has_phase_score = any('phase_composite_score' in stock for stock in selected_stocks)
     has_15day_score = any('15day_momentum_score' in stock for stock in selected_stocks)
     
-    if has_15day_score:
+    if has_phase_score:
         html = """
     <div class="selected-stocks">
         <h2>推荐前10个股</h2>
@@ -857,6 +858,30 @@ def generate_selected_stocks_html(selected_stocks):
                     <th>排名</th>
                     <th>股票代码</th>
                     <th>股票名称</th>
+                    <th>板块</th>
+                    <th>价格</th>
+                    <th>涨跌幅(%)</th>
+                    <th>主力净流入(亿)</th>
+                    <th>综合得分</th>
+                    <th>动量得分</th>
+                    <th>趋势得分</th>
+                    <th>成交量因子</th>
+                    <th>资金流因子</th>
+                </tr>
+            </thead>
+            <tbody>
+    """
+    elif has_15day_score:
+        html = """
+    <div class="selected-stocks">
+        <h2>推荐前10个股</h2>
+        <table class="stocks-table">
+            <thead>
+                <tr>
+                    <th>排名</th>
+                    <th>股票代码</th>
+                    <th>股票名称</th>
+                    <th>板块</th>
                     <th>价格</th>
                     <th>涨跌幅(%)</th>
                     <th>主力净流入(亿)</th>
@@ -876,6 +901,7 @@ def generate_selected_stocks_html(selected_stocks):
                     <th>排名</th>
                     <th>股票代码</th>
                     <th>股票名称</th>
+                    <th>板块</th>
                     <th>价格</th>
                     <th>涨跌幅(%)</th>
                     <th>主力净流入(亿)</th>
@@ -897,10 +923,25 @@ def generate_selected_stocks_html(selected_stocks):
         inflow_class = "positive" if main_inflow_yi >= 0 else "negative"
         inflow_sign = "+" if main_inflow_yi >= 0 else ""
         
-        ratio_class = "positive" if stock.get('main_ratio', 0) >= 0 else "negative"
-        ratio_sign = "+" if stock.get('main_ratio', 0) >= 0 else ""
-        
-        if has_15day_score:
+        if has_phase_score:
+            # 使用阶段选股结构：包含综合得分和各因子项分数
+            html += f"""
+                <tr>
+                    <td>{stock.get('rank', '')}</td>
+                    <td>{stock.get('code', '')}</td>
+                    <td>{stock.get('name', '')}</td>
+                    <td>{stock.get('sector', '')}</td>
+                    <td>{stock.get('price', '')}</td>
+                    <td class="{change_class}">{change_sign}{stock.get('change_rate', 0):.2f}</td>
+                    <td class="{inflow_class}">{inflow_sign}{main_inflow_yi}</td>
+                    <td class="positive">{stock.get('phase_composite_score', 0):.2f}</td>
+                    <td class="positive">{stock.get('phase_momentum_score', 0):.2f}</td>
+                    <td class="positive">{stock.get('phase_trend_score', 0):.2f}</td>
+                    <td class="positive">{stock.get('phase_volume_factor', 0):.2f}</td>
+                    <td class="positive">{stock.get('phase_fund_flow_factor', 0):.2f}</td>
+                </tr>
+            """
+        elif has_15day_score:
             # 使用新结构：包含15天动量得分和原动量得分
             html += f"""
                 <tr>
@@ -947,13 +988,20 @@ def load_selected_stocks():
         try:
             with open(selected_stocks_file, 'r', encoding='utf-8') as f:
                 data = json.load(f)
-            # 新的JSON结构包含两个因子类型的选股结果
-            # 优先显示15天动量反转因子的选股结果
-            if '15day_momentum_reversal_stocks' in data:
-                return data.get('15day_momentum_reversal_stocks', [])
-            # 如果新结构不存在，尝试旧结构
-            elif 'selected_stocks' in data:
+            
+            # 新的JSON结构只包含单一阶段的选股结果
+            if 'selected_stocks' in data:
                 return data.get('selected_stocks', [])
+            # 兼容旧的多阶段结构
+            elif '上涨阶段_stocks' in data:
+                return data.get('上涨阶段_stocks', [])
+            elif '下跌阶段_stocks' in data:
+                return data.get('下跌阶段_stocks', [])
+            elif '震荡阶段_stocks' in data:
+                return data.get('震荡阶段_stocks', [])
+            # 其次显示15天动量反转因子的选股结果
+            elif '15day_momentum_reversal_stocks' in data:
+                return data.get('15day_momentum_reversal_stocks', [])
             else:
                 return []
         except Exception as e:

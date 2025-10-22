@@ -3,6 +3,38 @@ import os
 import pandas as pd
 import numpy as np
 from datetime import datetime
+from eastmoney_fund_flow import generate_html_report
+
+# 阶段类型配置
+PHASE_CONFIG = {
+    "上涨阶段": {
+        "description": "市场处于上涨趋势，适合动量策略",
+        "weights": {
+            "momentum_factor": 0.4,      # 动量因子权重
+            "trend_factor": 0.3,        # 趋势因子权重
+            "volume_factor": 0.15,      # 成交量因子权重
+            "fund_flow_factor": 0.15    # 资金流向因子权重
+        }
+    },
+    "震荡阶段": {
+        "description": "市场处于震荡整理，适合反转策略",
+        "weights": {
+            "momentum_factor": 0.2,      # 动量因子权重
+            "trend_factor": 0.25,       # 趋势因子权重
+            "volume_factor": 0.25,      # 成交量因子权重
+            "fund_flow_factor": 0.3     # 资金流向因子权重
+        }
+    },
+    "下跌阶段": {
+        "description": "市场处于下跌趋势，适合防御性策略",
+        "weights": {
+            "momentum_factor": 0.15,     # 动量因子权重
+            "trend_factor": 0.35,       # 趋势因子权重
+            "volume_factor": 0.2,       # 成交量因子权重
+            "fund_flow_factor": 0.3     # 资金流向因子权重
+        }
+    }
+}
 
 def load_stock_data(json_file_path):
     """
@@ -188,6 +220,87 @@ def calculate_momentum_factor(stock, market_median_change=None):
     
     return momentum_score
 
+def calculate_trend_factor(stock):
+    """
+    计算均线趋势因子
+    
+    基于MA5、MA10、MA20均线系统，判断趋势方向和强度：
+    1. 均线金叉：短期均线上穿长期均线
+    2. 趋势方向：均线排列顺序判断趋势
+    3. 趋势强度：均线之间的间距和角度
+    4. 拐点判断：股价刚突破均线系统
+    
+    返回：趋势因子得分，正值表示向上趋势，负值表示向下趋势
+    """
+    # 检查是否有均线数据
+    if not all(key in stock for key in ['ma5', 'ma10', 'ma20']):
+        return 0.0
+    
+    ma5 = stock.get('ma5', 0)
+    ma10 = stock.get('ma10', 0)
+    ma20 = stock.get('ma20', 0)
+    current_price = stock.get('price', 0)
+    
+    # 检查数据有效性
+    if ma5 <= 0 or ma10 <= 0 or ma20 <= 0 or current_price <= 0:
+        return 0.0
+    
+    # 1. 均线金叉判断
+    # MA5上穿MA10且MA10上穿MA20为金叉
+    golden_cross_5_10 = ma5 > ma10
+    golden_cross_10_20 = ma10 > ma20
+    
+    # 2. 均线排列顺序（多头排列：MA5 > MA10 > MA20）
+    if golden_cross_5_10 and golden_cross_10_20:
+        # 完美多头排列
+        trend_strength = 1.0
+    elif golden_cross_5_10 and not golden_cross_10_20:
+        # 部分多头排列（MA5 > MA10但MA10 < MA20）
+        trend_strength = 0.5
+    elif not golden_cross_5_10 and golden_cross_10_20:
+        # 部分多头排列（MA5 < MA10但MA10 > MA20）
+        trend_strength = 0.3
+    else:
+        # 空头排列
+        trend_strength = -0.5
+    
+    # 3. 趋势强度计算（基于均线间距）
+    # MA5与MA10的间距
+    gap_5_10 = (ma5 - ma10) / ma10 * 100
+    # MA10与MA20的间距
+    gap_10_20 = (ma10 - ma20) / ma20 * 100
+    
+    # 趋势强度因子
+    gap_factor = min(2.0, max(-2.0, (gap_5_10 + gap_10_20) / 2))
+    
+    # 4. 拐点判断（股价刚突破均线系统）
+    # 当前价格相对于均线的位置
+    price_above_ma5 = current_price > ma5
+    price_above_ma10 = current_price > ma10
+    price_above_ma20 = current_price > ma20
+    
+    # 突破强度
+    if price_above_ma5 and price_above_ma10 and price_above_ma20:
+        # 完全突破
+        breakthrough_strength = 1.0
+    elif price_above_ma5 and price_above_ma10:
+        # 部分突破
+        breakthrough_strength = 0.6
+    elif price_above_ma5:
+        # 初步突破
+        breakthrough_strength = 0.3
+    else:
+        # 未突破
+        breakthrough_strength = -0.5
+    
+    # 5. 综合趋势因子计算
+    trend_score = trend_strength * 40 + gap_factor * 20 + breakthrough_strength * 40
+    
+    # 归一化到合理范围
+    trend_score = max(-100, min(100, trend_score))
+    
+    return trend_score
+
 def select_stocks_with_15day_factor(stock_data, top_n=10):
     """
     使用短期15天动量反转因子从所有股票中选择top_n只
@@ -273,18 +386,111 @@ def select_stocks(stock_data, top_n=10):
     
     return selected_stocks
 
-def generate_selection_report(selected_stocks, use_15day_factor=False):
+def select_stocks_with_phase(stock_data, phase_type="上涨阶段", top_n=10):
+    """
+    使用阶段类型配置的选股策略
+    
+    Args:
+        stock_data: 股票数据
+        phase_type: 阶段类型（上涨阶段/震荡阶段/下跌阶段）
+        top_n: 选择前n只股票
+    """
+    # 检查阶段类型是否有效
+    if phase_type not in PHASE_CONFIG:
+        print(f"错误: 无效的阶段类型 '{phase_type}'，请使用以下类型之一: {list(PHASE_CONFIG.keys())}")
+        return []
+    
+    # 获取阶段配置
+    phase_config = PHASE_CONFIG[phase_type]
+    weights = phase_config['weights']
+    
+    print(f"=== 使用 {phase_type} 选股策略 ===")
+    print(f"策略描述: {phase_config['description']}")
+    print(f"因子权重配置: {weights}")
+    
+    # 收集所有股票，添加错误处理
+    if 'sector_stocks' in stock_data:
+        all_stocks = collect_all_stocks(stock_data['sector_stocks'])
+    else:
+        # 尝试其他可能的数据结构格式
+        all_stocks = []
+        print("警告: 'sector_stocks' 键不存在，尝试查找其他格式的数据...")
+        
+        # 如果stock_data本身就是一个字典，尝试直接从中提取股票数据
+        if isinstance(stock_data, dict):
+            for key, value in stock_data.items():
+                if isinstance(value, list) and len(value) > 0 and isinstance(value[0], dict) and 'code' in value[0]:
+                    # 找到可能的股票列表
+                    for stock in value:
+                        stock['sector'] = key
+                        all_stocks.append(stock)
+    
+    if not all_stocks:
+        print("错误: 未能找到任何股票数据")
+        return []
+    
+    print(f"总共收集到{len(all_stocks)}只股票")
+    
+    # 计算市场中位数涨跌幅，用于动态调整
+    change_rates = [stock.get('change_rate', 0) for stock in all_stocks]
+    market_median_change = np.median(change_rates) if change_rates else 0
+    
+    # 计算每只股票的综合得分
+    for stock in all_stocks:
+        # 计算各个因子得分
+        momentum_score = calculate_momentum_factor(stock, market_median_change)
+        trend_score = calculate_trend_factor(stock)
+        
+        # 计算成交量因子（基于量比）
+        volume_ratio = stock.get('volume_ratio', 1.0)
+        volume_factor = min(3.0, volume_ratio) - 1.0
+        if volume_ratio > 3.0:
+            volume_factor = 2.0 + (volume_ratio - 3.0) * 0.2
+        
+        # 计算资金流向因子
+        main_inflow = stock.get('main_inflow', 0)
+        main_ratio = stock.get('main_ratio', 0)
+        fund_flow_factor = 0.6 * (main_inflow / 1e8) + 0.4 * main_ratio
+        
+        # 应用阶段权重计算综合得分
+        composite_score = (
+            momentum_score * weights['momentum_factor'] +
+            trend_score * weights['trend_factor'] +
+            volume_factor * 20 * weights['volume_factor'] +  # 放大成交量因子
+            fund_flow_factor * 20 * weights['fund_flow_factor']  # 放大资金流向因子
+        )
+        
+        # 存储各个因子得分和综合得分
+        stock['phase_momentum_score'] = momentum_score
+        stock['phase_trend_score'] = trend_score
+        stock['phase_volume_factor'] = volume_factor
+        stock['phase_fund_flow_factor'] = fund_flow_factor
+        stock['phase_composite_score'] = composite_score
+        stock['phase_type'] = phase_type
+    
+    # 按综合得分排序，选择前top_n只股票
+    selected_stocks = sorted(all_stocks, key=lambda x: x['phase_composite_score'], reverse=True)[:top_n]
+    
+    return selected_stocks
+
+def generate_selection_report(selected_stocks, use_15day_factor=False, phase_type=None):
     """
     生成选股报告
     
     Args:
         selected_stocks: 选中的股票列表
         use_15day_factor: 是否使用15天动量反转因子
+        phase_type: 阶段类型（上涨阶段/震荡阶段/下跌阶段）
     """
+    if phase_type:
+        factor_type = f'phase_{phase_type}'
+    else:
+        factor_type = '15day_momentum_reversal' if use_15day_factor else 'original_momentum'
+    
     report = {
         'selection_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
         'total_selected': len(selected_stocks),
-        'factor_type': '15day_momentum_reversal' if use_15day_factor else 'original_momentum',
+        'factor_type': factor_type,
         'selected_stocks': []
     }
     
@@ -304,7 +510,15 @@ def generate_selection_report(selected_stocks, use_15day_factor=False):
             'large_ratio': stock.get('large_ratio', 0)
         }
         
-        if use_15day_factor:
+        if phase_type:
+            # 阶段类型选股报告
+            stock_report['phase_type'] = phase_type
+            stock_report['phase_composite_score'] = stock.get('phase_composite_score', 0)
+            stock_report['phase_momentum_score'] = stock.get('phase_momentum_score', 0)
+            stock_report['phase_trend_score'] = stock.get('phase_trend_score', 0)
+            stock_report['phase_volume_factor'] = stock.get('phase_volume_factor', 0)
+            stock_report['phase_fund_flow_factor'] = stock.get('phase_fund_flow_factor', 0)
+        elif use_15day_factor:
             stock_report['15day_momentum_score'] = stock.get('15day_momentum_score', 0)
             stock_report['old_momentum_score'] = stock.get('old_momentum_score', 0)
         else:
@@ -325,7 +539,7 @@ def save_selection_result(report, output_file='selected_stocks.json'):
     except Exception as e:
         print(f"保存选股结果失败: {e}")
 
-def save_combined_selection_result(report_old, report_new, output_file='selected_stocks_combined.json'):
+def save_combined_selection_result(report_old, report_new, phase_reports=None, output_file='selected_stocks_combined.json'):
     """
     保存合并的选股结果到单个JSON文件
     """
@@ -340,27 +554,43 @@ def save_combined_selection_result(report_old, report_new, output_file='selected
             '15day_momentum_reversal_stocks': report_new.get('selected_stocks', [])
         }
         
+        # 添加阶段选股结果
+        if phase_reports:
+            combined_report['total_selected']['phase_selection'] = sum(len(report.get('selected_stocks', [])) for report in phase_reports.values())
+            for phase_type, report in phase_reports.items():
+                combined_report[f'{phase_type}_stocks'] = report.get('selected_stocks', [])
+        
         with open(output_file, 'w', encoding='utf-8') as f:
             json.dump(combined_report, f, ensure_ascii=False, indent=2)
         print(f"合并选股结果已保存到 {output_file}")
     except Exception as e:
         print(f"保存合并选股结果失败: {e}")
 
-def print_selection_summary(selected_stocks, use_15day_factor=False):
+def print_selection_summary(selected_stocks, use_15day_factor=False, phase_type=None):
     """
     打印选股结果摘要
     
     Args:
         selected_stocks: 选中的股票列表
         use_15day_factor: 是否使用15天动量反转因子
+        phase_type: 阶段类型（上涨阶段/震荡阶段/下跌阶段）
     """
-    factor_type = "15天动量反转因子" if use_15day_factor else "原动量因子"
+    if phase_type:
+        factor_type = f"阶段类型选股 ({phase_type})"
+    else:
+        factor_type = "15天动量反转因子" if use_15day_factor else "原动量因子"
     
     print(f"\n=== 选股结果摘要 ({factor_type}) ===")
     print(f"选股时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"共选出{len(selected_stocks)}只股票")
     
-    if use_15day_factor:
+    if phase_type:
+        print("\n排名  股票代码  股票名称      行业      价格    涨跌幅(%)  综合得分  动量得分  趋势得分  成交量因子  资金流向因子")
+        print("-" * 150)
+        
+        for i, stock in enumerate(selected_stocks, 1):
+            print(f"{i:<4}  {stock.get('code', ''):<8}  {stock.get('name', ''):<10}  {stock.get('sector', ''):<8}  {stock.get('price', 0):<8.2f}  {stock.get('change_rate', 0):<9.2f}  {stock.get('phase_composite_score', 0):<8.2f}  {stock.get('phase_momentum_score', 0):<8.2f}  {stock.get('phase_trend_score', 0):<8.2f}  {stock.get('phase_volume_factor', 0):<10.2f}  {stock.get('phase_fund_flow_factor', 0):<12.2f}")
+    elif use_15day_factor:
         print("\n排名  股票代码  股票名称      行业      价格    涨跌幅(%)  15天动量得分  原动量得分")
         print("-" * 120)
         
@@ -382,6 +612,9 @@ def main():
     """
     print("开始执行选股策略...")
     
+    # 配置当前使用的阶段类型（可修改为'上涨阶段'、'震荡阶段'或'下跌阶段'）
+    CURRENT_PHASE_TYPE = '下跌阶段'  # 当前配置为下跌阶段
+    
     # 获取当前目录下的eastmoney_crawl_data.json文件
     json_file = 'eastmoney_crawl_data.json'
     
@@ -395,31 +628,25 @@ def main():
         print("无法加载股票数据，程序退出")
         return
     
-    print("\n=== 使用原动量因子选股 ===")
-    # 执行原版选股
-    selected_stocks_old = select_stocks(data, top_n=10)
+    print(f"\n=== 使用{CURRENT_PHASE_TYPE}阶段选股策略 ===")
+    print(f"阶段配置: {PHASE_CONFIG[CURRENT_PHASE_TYPE]['description']}")
+    print(f"因子权重: {PHASE_CONFIG[CURRENT_PHASE_TYPE]['weights']}")
+    
+    # 执行阶段类型选股（只使用配置的阶段）
+    selected_stocks_phase = select_stocks_with_phase(data, phase_type=CURRENT_PHASE_TYPE, top_n=10)
     
     # 生成报告
-    report_old = generate_selection_report(selected_stocks_old, use_15day_factor=False)
+    phase_report = generate_selection_report(selected_stocks_phase, phase_type=CURRENT_PHASE_TYPE)
     
     # 打印摘要
-    print_selection_summary(selected_stocks_old, use_15day_factor=False)
+    print_selection_summary(selected_stocks_phase, phase_type=CURRENT_PHASE_TYPE)
     
-    print("\n=== 使用15天动量反转因子选股 ===")
-    # 执行新版选股
-    selected_stocks_new = select_stocks_with_15day_factor(data, top_n=10)
-    
-    # 生成报告
-    report_new = generate_selection_report(selected_stocks_new, use_15day_factor=True)
-    
-    # 打印摘要
-    print_selection_summary(selected_stocks_new, use_15day_factor=True)
-    
-    # 保存合并结果到单个文件
-    save_combined_selection_result(report_old, report_new, 'selected_stocks.json')
+    # 保存选股结果到文件（只保存配置阶段的选股结果）
+    save_selection_result(phase_report, 'selected_stocks.json')
     
     print("\n选股策略执行完成！")
-    print("选股结果已合并保存到: selected_stocks.json")
+    print(f"选股结果已保存到: selected_stocks.json")
+    print(f"当前使用阶段: {CURRENT_PHASE_TYPE}")
 
 if __name__ == "__main__":
     main()
