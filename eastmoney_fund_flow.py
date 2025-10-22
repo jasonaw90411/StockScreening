@@ -913,15 +913,15 @@ def generate_selected_stocks_html(selected_stocks):
     
     for stock in selected_stocks:
         # 格式化数据
-        main_inflow_yi = round(stock.get('main_inflow', 0) / 1e8, 2)
+        main_inflow_value = round(stock.get('main_inflow', 0), 2)
         
         # 判断涨跌幅的颜色类
         change_class = "positive" if stock.get('change_rate', 0) >= 0 else "negative"
         change_sign = "+" if stock.get('change_rate', 0) >= 0 else ""
         
         # 判断资金流入的颜色类
-        inflow_class = "positive" if main_inflow_yi >= 0 else "negative"
-        inflow_sign = "+" if main_inflow_yi >= 0 else ""
+        inflow_class = "positive" if main_inflow_value >= 0 else "negative"
+        inflow_sign = "+" if main_inflow_value >= 0 else ""
         
         if has_phase_score:
             # 使用阶段选股结构：包含综合得分和各因子项分数
@@ -933,7 +933,7 @@ def generate_selected_stocks_html(selected_stocks):
                     <td>{stock.get('sector', '')}</td>
                     <td>{stock.get('price', '')}</td>
                     <td class="{change_class}">{change_sign}{stock.get('change_rate', 0):.2f}</td>
-                    <td class="{inflow_class}">{inflow_sign}{main_inflow_yi}</td>
+                    <td class="{inflow_class}">{inflow_sign}{main_inflow_value}</td>
                     <td class="positive">{stock.get('phase_composite_score', 0):.2f}</td>
                     <td class="positive">{stock.get('phase_momentum_score', 0):.2f}</td>
                     <td class="positive">{stock.get('phase_trend_score', 0):.2f}</td>
@@ -951,7 +951,7 @@ def generate_selected_stocks_html(selected_stocks):
                     <td>{stock.get('sector', '')}</td>
                     <td>{stock.get('price', '')}</td>
                     <td class="{change_class}">{change_sign}{stock.get('change_rate', 0):.2f}</td>
-                    <td class="{inflow_class}">{inflow_sign}{main_inflow_yi}</td>
+                    <td class="{inflow_class}">{inflow_sign}{main_inflow_value}</td>
                     <td class="positive">{stock.get('15day_momentum_score', 0):.2f}</td>
                     <td class="positive">{stock.get('old_momentum_score', 0):.2f}</td>
                 </tr>
@@ -966,7 +966,7 @@ def generate_selected_stocks_html(selected_stocks):
                     <td>{stock.get('sector', '')}</td>
                     <td>{stock.get('price', '')}</td>
                     <td class="{change_class}">{change_sign}{stock.get('change_rate', 0):.2f}</td>
-                    <td class="{inflow_class}">{inflow_sign}{main_inflow_yi}</td>
+                    <td class="{inflow_class}">{inflow_sign}{main_inflow_value}</td>
                     <td class="positive">{stock.get('momentum_score', 0):.2f}</td>
                 </tr>
             """

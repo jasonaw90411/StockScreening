@@ -495,6 +495,7 @@ def generate_selection_report(selected_stocks, use_15day_factor=False, phase_typ
     }
     
     for i, stock in enumerate(selected_stocks, 1):
+        # 确保main_inflow保持原始单位（元），不进行单位转换
         stock_report = {
             'rank': i,
             'code': stock.get('code', ''),
@@ -502,7 +503,7 @@ def generate_selection_report(selected_stocks, use_15day_factor=False, phase_typ
             'sector': stock.get('sector', ''),
             'price': stock.get('price', 0),
             'change_rate': stock.get('change_rate', 0),
-            'main_inflow': stock.get('main_inflow', 0),
+            'main_inflow': stock.get('main_inflow', 0),  # 保持原始单位
             'main_ratio': stock.get('main_ratio', 0),
             'super_large_inflow': stock.get('super_large_inflow', 0),
             'super_large_ratio': stock.get('super_large_ratio', 0),
@@ -613,7 +614,7 @@ def main():
     print("开始执行选股策略...")
     
     # 配置当前使用的阶段类型（可修改为'上涨阶段'、'震荡阶段'或'下跌阶段'）
-    CURRENT_PHASE_TYPE = '下跌阶段'  # 当前配置为下跌阶段
+    CURRENT_PHASE_TYPE = '震荡阶段'  # 当前配置为下跌阶段
     
     # 获取当前目录下的eastmoney_crawl_data.json文件
     json_file = 'eastmoney_crawl_data.json'
