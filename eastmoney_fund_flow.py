@@ -1238,13 +1238,13 @@ def generate_all_sectors_table(all_sectors):
     return html
 
 # 获取股票历史价格数据
-def get_stock_history_prices(stock_code, days=15):
+def get_stock_history_prices(stock_code, days=30):
     """
     获取股票近N个交易日的收盘价数据
     
     Args:
         stock_code: 股票代码（如：000001）
-        days: 获取的交易天数，默认15个交易日
+        days: 获取的交易天数，默认30个交易日
     
     Returns:
         list: 包含日期和收盘价的字典列表
@@ -1258,7 +1258,7 @@ def get_stock_history_prices(stock_code, days=15):
     
     full_code = f"{market_code}.{stock_code}"
     
-    # 计算开始日期（15个交易日前）
+    # 计算开始日期（考虑非交易日，多取一些日期）
     end_date = datetime.now()
     start_date = end_date - timedelta(days=days * 2)  # 考虑非交易日，多取一些日期
     
@@ -1270,19 +1270,19 @@ def get_stock_history_prices(stock_code, days=15):
         'secid': full_code,
         'beg': start_date.strftime('%Y%m%d'),
         'end': end_date.strftime('%Y%m%d'),
-        'lmt': days + 10,  # 多取一些数据，确保有足够交易日
+        'lmt': days + 20,  # 多取一些数据，确保有足够交易日
         '_': str(int(time.time() * 1000))
     })
     
     headers = STOCK_API_CONFIG['headers'].copy()
     
     try:
-        logger.info(f"正在获取股票 {stock_code} 的历史价格数据...")
+        logger.info(f"正在获取股票 {stock_code} 的 {days} 个交易日历史价格数据...")
         
         # 添加随机延迟避免请求过快
         time.sleep(random.uniform(0.5, 1.5))
         
-        response = requests.get(url, params=params, headers=headers, timeout=10)
+        response = requests.get(url, params=params, headers=headers, timeout=15)
         response.raise_for_status()
         
         data = response.json()
@@ -1291,19 +1291,27 @@ def get_stock_history_prices(stock_code, days=15):
             history_prices = []
             klines = data['data']['klines']
             
-            # 解析K线数据
+            # 解析K线数据，按日期倒序排列（最新的在前）
             for kline in klines[:days]:  # 只取前N个交易日
                 parts = kline.split(',')
-                if len(parts) >= 2:
+                if len(parts) >= 6:  # 确保有足够的字段
                     date_str = parts[0]  # 日期
+                    open_price = float(parts[1])  # 开盘价
                     close_price = float(parts[2])  # 收盘价
+                    high_price = float(parts[3])  # 最高价
+                    low_price = float(parts[4])  # 最低价
+                    volume = float(parts[5])  # 成交量
                     
                     history_prices.append({
                         'date': date_str,
-                        'close_price': close_price
+                        'open_price': open_price,
+                        'close_price': close_price,
+                        'high_price': high_price,
+                        'low_price': low_price,
+                        'volume': volume
                     })
             
-            logger.info(f"成功获取股票 {stock_code} 的 {len(history_prices)} 个交易日收盘价")
+            logger.info(f"成功获取股票 {stock_code} 的 {len(history_prices)} 个交易日历史价格数据")
             return history_prices
         else:
             logger.warning(f"未获取到股票 {stock_code} 的历史价格数据")
@@ -1314,13 +1322,13 @@ def get_stock_history_prices(stock_code, days=15):
         return []
 
 # 为股票数据添加历史价格信息
-def add_history_prices_to_stocks(stocks, days=15):
+def add_history_prices_to_stocks(stocks, days=30):
     """
     为股票列表中的每只股票添加历史价格数据
     
     Args:
         stocks: 股票数据列表
-        days: 获取的历史交易日数
+        days: 获取的历史交易日数，默认30个交易日
     
     Returns:
         list: 包含历史价格数据的股票列表
@@ -1328,7 +1336,7 @@ def add_history_prices_to_stocks(stocks, days=15):
     if not stocks:
         return stocks
     
-    logger.info(f"开始为 {len(stocks)} 只股票添加历史价格数据...")
+    logger.info(f"开始为 {len(stocks)} 只股票添加 {days} 个交易日历史价格数据...")
     
     for i, stock in enumerate(stocks):
         stock_code = stock.get('code', '')
@@ -1339,35 +1347,75 @@ def add_history_prices_to_stocks(stocks, days=15):
             # 添加到股票数据中
             stock['history_prices'] = history_prices
             
-            # 计算一些技术指标
+            # 计算技术指标
             if history_prices:
-                # 计算简单移动平均线
+                # 提取价格数据
                 close_prices = [price['close_price'] for price in history_prices]
+                open_prices = [price['open_price'] for price in history_prices]
+                high_prices = [price['high_price'] for price in history_prices]
+                low_prices = [price['low_price'] for price in history_prices]
+                volumes = [price['volume'] for price in history_prices]
                 
-                # 5日移动平均线
+                # 计算移动平均线
                 if len(close_prices) >= 5:
                     stock['ma5'] = sum(close_prices[:5]) / 5
-                
-                # 10日移动平均线
                 if len(close_prices) >= 10:
                     stock['ma10'] = sum(close_prices[:10]) / 10
+                if len(close_prices) >= 20:
+                    stock['ma20'] = sum(close_prices[:20]) / 20
+                if len(close_prices) >= 30:
+                    stock['ma30'] = sum(close_prices[:30]) / 30
                 
                 # 计算涨跌幅
                 if len(close_prices) >= 2:
                     latest_price = close_prices[0]
                     prev_price = close_prices[1]
                     stock['history_change_rate'] = ((latest_price - prev_price) / prev_price) * 100
+                    
+                    # 计算30日涨跌幅
+                    if len(close_prices) >= 30:
+                        stock['history_change_rate_30d'] = ((latest_price - close_prices[29]) / close_prices[29]) * 100
                 
                 # 计算最高价和最低价
                 stock['history_high'] = max(close_prices) if close_prices else 0
                 stock['history_low'] = min(close_prices) if close_prices else 0
                 
-                logger.info(f"  [{i+1}/{len(stocks)}] {stock['name']}({stock_code}) - 历史价格数据已添加")
+                # 计算波动率（标准差）
+                if len(close_prices) >= 10:
+                    mean_price = sum(close_prices) / len(close_prices)
+                    variance = sum((price - mean_price) ** 2 for price in close_prices) / len(close_prices)
+                    stock['volatility'] = variance ** 0.5
+                
+                # 计算成交量指标
+                if len(volumes) >= 5:
+                    stock['volume_ma5'] = sum(volumes[:5]) / 5
+                if len(volumes) >= 10:
+                    stock['volume_ma10'] = sum(volumes[:10]) / 10
+                
+                # 计算相对强弱指标（RSI）
+                if len(close_prices) >= 14:
+                    gains = []
+                    losses = []
+                    for j in range(1, min(15, len(close_prices))):
+                        change = close_prices[j-1] - close_prices[j]
+                        if change > 0:
+                            gains.append(change)
+                        else:
+                            losses.append(abs(change))
+                    
+                    if gains and losses:
+                        avg_gain = sum(gains) / len(gains)
+                        avg_loss = sum(losses) / len(losses)
+                        if avg_loss != 0:
+                            rs = avg_gain / avg_loss
+                            stock['rsi'] = 100 - (100 / (1 + rs))
+                
+                logger.info(f"  [{i+1}/{len(stocks)}] {stock['name']}({stock_code}) - {days}日历史价格数据已添加")
             
             # 添加延迟避免请求过快
             time.sleep(0.5)
     
-    logger.info("历史价格数据添加完成！")
+    logger.info(f"{days}日历史价格数据添加完成！")
     return stocks
 
 # 主函数
@@ -1418,9 +1466,9 @@ def fetch_sector_stocks_data(top_sectors_with_urls: List[Dict]) -> Dict[str, Lis
             
             # 为个股添加历史价格数据
             if stocks:
-                stocks_with_history = add_history_prices_to_stocks(stocks, days=15)
+                stocks_with_history = add_history_prices_to_stocks(stocks, days=30)
                 all_sector_stocks[sector_name] = stocks_with_history
-                logger.info(f"  成功获取 {len(stocks_with_history)} 只个股数据（包含历史价格）")
+                logger.info(f"  成功获取 {len(stocks_with_history)} 只个股数据（包含30日历史价格）")
             else:
                 logger.warning(f"  未能获取到个股数据")
                 all_sector_stocks[sector_name] = []
@@ -1443,12 +1491,12 @@ def print_results_summary(top_sectors_with_urls: List[Dict], all_sector_stocks: 
                 url = sector.get('url', 'N/A')
                 stock_count = len(all_sector_stocks.get(sector['name'], []))
                 logger.info(f"   {i}. {sector['name']} - 超大单流入: {sector['super_large_inflow']}亿, 大单流入: {sector['large_inflow']}亿, URL: {url}")
-                logger.info(f"      个股数据: {stock_count} 只（包含15日历史价格）")
+                logger.info(f"      个股数据: {stock_count} 只（包含30日历史价格）")
         else:
             logger.warning("   暂无符合条件的板块")
         
         total_stocks = sum(len(stocks) for stocks in all_sector_stocks.values())
-        logger.info(f"2. 总共获取个股数据: {total_stocks} 只（包含15日历史价格）")
+        logger.info(f"2. 总共获取个股数据: {total_stocks} 只（包含30日历史价格）")
         logger.info(f"3. HTML报告已保存至: {html_file}")
         logger.info(f"4. 详细数据已保存至: eastmoney_crawl_data.json")
     else:
