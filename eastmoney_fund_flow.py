@@ -1,6 +1,7 @@
 import os
 import json
 import subprocess
+import logging
 from datetime import datetime, timedelta
 import requests
 import re
@@ -10,158 +11,319 @@ import random
 import pandas as pd
 from io import StringIO
 from urllib.parse import quote
+from typing import Dict, List, Optional, Tuple
 
-# 获取东方财富网板块资金流入数据
-def crawl_eastmoney_fund_flow(max_retries=3):
-    """
-    从东方财富网爬取板块资金流向数据
-    URL: https://data.eastmoney.com/bkzj/hy.html
-    获取今日超大单和大单都是净流入的前三个板块
-    """
-    # 主要使用API方式，同时保留HTML解析作为备选
-    api_url = "http://push2.eastmoney.com/api/qt/clist/get"
-    html_url = "https://data.eastmoney.com/bkzj/hy.html"
-    
-    # 模拟浏览器请求头 - 使用更现代的浏览器UA
-    headers = {
+# 配置日志
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('eastmoney_crawler.log', encoding='utf-8'),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
+
+# API配置常量
+API_CONFIG = {
+    'api_url': "http://push2.eastmoney.com/api/qt/clist/get",
+    'html_url': "https://data.eastmoney.com/bkzj/hy.html",
+    'headers': {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
         'Accept': '*/*',
         'Accept-Language': 'zh-CN,zh;q=0.9',
         'Connection': 'keep-alive',
         'Referer': 'https://data.eastmoney.com/bkzj/hy.html',
+    },
+    'params': {
+        'pn': 1,  # 页码
+        'pz': 100,  # 每页数量
+        'po': 1,  # 排序方式
+        'np': 1,
+        'ut': 'bd1d9ddb04089700cf9c27f6f7426281',
+        'fltt': 2,  # 过滤条件
+        'invt': 2,
+        'fid': 'f62',  # 按主力净流入排序
+        'fs': 'm:90 t:2',  # 板块类型：行业板块
+        'fields': 'f1,f14,f62,f66,f69,f72,f75,f184,f128,f136',  # 所需字段
     }
+}
+
+# 股票数据API配置
+STOCK_API_CONFIG = {
+    'base_url': 'https://push2.eastmoney.com/api/qt/clist/get',
+    'kline_url': 'http://push2his.eastmoney.com/api/qt/stock/kline/get',
+    'headers': {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
+        'Accept': 'application/json, text/plain, */*',
+        'Accept-Language': 'zh-CN,zh;q=0.9',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Connection': 'keep-alive',
+        'Referer': 'https://data.eastmoney.com/',
+    },
+    'stock_fields': 'f1,f2,f3,f4,f5,f6,f7,f8,f9,f10,f12,f13,f14,f15,f16,f17,f18,f19,f20,f21,f23,f24,f25,f26,f62,f66,f69,f72,f75,f128',
+    'kline_fields': 'f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61',
+    'default_params': {
+        'pn': 1,
+        'pz': 30,
+        'po': 1,
+        'np': 1,
+        'ut': 'bd1d9ddb04089700cf9c27f6f7426281',
+        'fltt': 2,
+        'invt': 2,
+        'fid': 'f62',
+    },
+    'kline_params': {
+        'fields1': 'f1,f2,f3,f4,f5,f6',
+        'fields2': 'f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61',
+        'klt': '101',  # 日K线
+        'fqt': '1',    # 前复权
+    }
+}
+
+# 数据提取配置
+EXTRACTION_CONFIG = {
+    'min_data_rows': 5,  # 最小数据行数
+    'max_retries': 3,    # 最大重试次数
+    'table_min_rows': 10,  # 表格最小行数
+    'table_min_cols': 8,   # 表格最小列数
+    'pandas_table_min_rows': 10,  # pandas表格最小行数
+    'pandas_table_min_cols': 8,   # pandas表格最小列数
+    'delay_range': (0.5, 2.0),    # 延迟范围
+    'retry_delay_range': (3.0, 5.0),  # 重试延迟范围
+    'timeout': 15,  # 请求超时时间
+    'debug_print_limit': 5,  # 调试打印限制
+    'regex_match_limit': 20,   # 正则匹配限制
+    'extraction_methods': ['api', 'html_table', 'page_text', 'pandas']  # 提取方法顺序
+}
+
+# 字段映射配置
+FIELD_MAPPINGS = {
+    'name': ['名称', '板块', '行业', '板块名称'],
+    'change_rate': ['涨跌幅', '涨', '跌幅', '涨跌'],
+    'super_large_inflow': ['超大单净流入', '超大单流入', '超大单'],
+    'super_large_ratio': ['超大单净流入净占比', '超大单净占比', '超大单占比'],
+    'large_inflow': ['大单净流入', '大单流入', '大单'],
+    'large_ratio': ['大单净流入净占比', '大单净占比', '大单占比'],
+    'max_stock': ['主力净流入最大股', '最大股', '主力股']
+}
+
+def retry_with_backoff(max_retries: int = 3, base_delay: float = 1.0, max_delay: float = 10.0):
+    """
+    重试装饰器，支持指数退避
     
-    for attempt in range(max_retries):
+    Args:
+        max_retries: 最大重试次数
+        base_delay: 基础延迟时间（秒）
+        max_delay: 最大延迟时间（秒）
+    """
+    def decorator(func):
+        def wrapper(*args, **kwargs):
+            for attempt in range(max_retries):
+                try:
+                    return func(*args, **kwargs)
+                except Exception as e:
+                    if attempt == max_retries - 1:
+                        logger.error(f"函数 {func.__name__} 在 {max_retries} 次尝试后失败: {e}")
+                        raise
+                    
+                    # 计算退避延迟
+                    delay = min(base_delay * (2 ** attempt) + random.uniform(0, 1), max_delay)
+                    logger.warning(f"函数 {func.__name__} 第 {attempt + 1} 次尝试失败: {e}, 等待 {delay:.1f} 秒后重试")
+                    time.sleep(delay)
+            
+            return None
+        return wrapper
+    return decorator
+
+# 获取东方财富网板块资金流入数据
+@retry_with_backoff(max_retries=3, base_delay=1.0, max_delay=10.0)
+def crawl_eastmoney_fund_flow(max_retries: int = 3) -> Tuple[List[Dict], List[Dict]]:
+    """
+    从东方财富网爬取板块资金流向数据
+    URL: https://data.eastmoney.com/bkzj/hy.html
+    获取今日超大单和大单都是净流入的前五个板块
+    
+    Returns:
+        Tuple[List[Dict], List[Dict]]: (top_sectors, all_sectors)
+    """
+    logger.info("开始爬取东方财富网板块资金流入数据")
+    
+    # 添加随机延迟避免被封
+    time.sleep(random.uniform(0.5, 2.0))
+    
+    # 尝试API方式获取数据
+    all_sectors = fetch_sectors_from_api()
+    
+    # 如果API获取数据不足，尝试HTML解析方式
+    if len(all_sectors) < 5:
+        logger.warning("API获取数据不足，尝试HTML解析方式...")
+        all_sectors = fetch_sectors_from_html()
+    
+    # 如果还是数据不足，抛出异常触发重试
+    if len(all_sectors) < 5:
+        raise ValueError("无法获取足够数据，需要重试")
+    
+    # 处理获取到的数据
+    return process_sectors_data(all_sectors)
+
+def fetch_sectors_from_api() -> List[Dict]:
+    """从API获取板块数据"""
+    logger.info("尝试通过API获取板块数据...")
+    
+    try:
+        # 构建API参数
+        params = API_CONFIG['params'].copy()
+        params['_'] = str(int(time.time() * 1000))  # 时间戳防止缓存
+        
+        response = requests.get(
+            API_CONFIG['api_url'], 
+            params=params, 
+            headers=API_CONFIG['headers'], 
+            timeout=15
+        )
+        response.raise_for_status()
+        
+        logger.info(f"API响应状态码: {response.status_code}")
+        return parse_api_response(response.json())
+        
+    except requests.Timeout as e:
+        logger.error(f"API请求超时: {e}")
+        return []
+    except requests.ConnectionError as e:
+        logger.error(f"API连接错误: {e}")
+        return []
+    except requests.HTTPError as e:
+        logger.error(f"API HTTP错误 (状态码: {response.status_code}): {e}")
+        return []
+    except requests.RequestException as e:
+        logger.error(f"API请求失败: {e}")
+        return []
+    except json.JSONDecodeError as e:
+        logger.error(f"API响应解析失败: {e}")
+        return []
+    except Exception as e:
+        logger.error(f"API获取数据时发生未知错误: {e}")
+        return []
+
+def parse_api_response(data: Dict) -> List[Dict]:
+    """解析API响应数据"""
+    all_sectors = []
+    
+    if not data.get('data') or not data['data'].get('diff'):
+        logger.warning("API响应数据格式不正确")
+        return all_sectors
+    
+    diff_data = data['data']['diff']
+    logger.info(f"API响应数据字段: {list(diff_data[0].keys()) if diff_data else '无数据'}")
+    
+    for item in diff_data:
         try:
-            # 添加随机延迟避免被封
-            time.sleep(random.uniform(1, 3))
-            
-            print(f"第{attempt + 1}次尝试获取东方财富网板块资金流入数据...")
-            
-            # 方法1: 直接调用API获取数据（推荐方法）
-            print("方法1: 尝试直接调用东方财富网API...")
-            # 东方财富网板块资金流向API参数
-            params = {
-                'pn': 1,  # 页码
-                'pz': 100,  # 每页数量
-                'po': 1,  # 排序方式
-                'np': 1,
-                'ut': 'bd1d9ddb04089700cf9c27f6f7426281',
-                'fltt': 2,  # 过滤条件
-                'invt': 2,
-                'fid': 'f62',  # 按主力净流入排序
-                'fs': 'm:90 t:2',  # 板块类型：行业板块
-                'fields': 'f1,f14,f62,f66,f69,f72,f75,f184,f128,f136',  # 所需字段
-                '_': str(int(time.time() * 1000))  # 时间戳防止缓存
+            sector_data = {
+                'name': item.get('f14', '未知'),  # 板块名称
+                'change_rate': float(item.get('f3', 0)),  # 涨跌幅
+                'super_large_inflow': float(item.get('f66', 0)) / 10000,  # 超大单净流入（转换为亿元）
+                'super_large_ratio': float(item.get('f69', 0)),  # 超大单净占比
+                'large_inflow': float(item.get('f72', 0)) / 10000,  # 大单净流入（转换为亿元）
+                'large_ratio': float(item.get('f75', 0)),  # 大单净占比
+                'max_stock': item.get('f128', '未知')  # 主力净流入最大股
             }
             
-            response = requests.get(api_url, params=params, headers=headers, timeout=15)
-            response.raise_for_status()
+            all_sectors.append(sector_data)
             
-            print(f"API响应状态码: {response.status_code}")
-            
-            # 解析API响应
-            data = response.json()
-            all_sectors = []
-            
-            if data.get('data') and data['data'].get('diff'):
-                print(f"API响应数据字段: {list(data['data']['diff'][0].keys()) if data['data']['diff'] else '无数据'}")
-                
-                for item in data['data']['diff']:
-                    try:
-                        sector_data = {
-                            'name': item.get('f14', '未知'),  # 板块名称
-                            'change_rate': float(item.get('f3', 0)),  # 涨跌幅
-                            'super_large_inflow': float(item.get('f66', 0)) / 10000,  # 超大单净流入（转换为亿元）
-                            'super_large_ratio': float(item.get('f69', 0)),  # 超大单净占比
-                            'large_inflow': float(item.get('f72', 0)) / 10000,  # 大单净流入（转换为亿元）
-                            'large_ratio': float(item.get('f75', 0)),  # 大单净占比
-                            'max_stock': item.get('f128', '未知')  # 主力净流入最大股
-                        }
-                        
-                        all_sectors.append(sector_data)
-                        
-                        # 只打印前5个用于调试
-                        if len(all_sectors) <= 5:
-                            print(f"API提取板块数据: {sector_data['name']}, 超大单流入: {sector_data['super_large_inflow']}亿, 大单流入: {sector_data['large_inflow']}亿")
-                    
-                    except (ValueError, TypeError, KeyError) as e:
-                        print(f"解析API数据项失败: {e}, 数据项: {item}")
-                        continue
-            
-            # 如果API调用成功且获取到足够数据，继续处理
-            if len(all_sectors) >= 5:
-                print(f"API成功获取到{len(all_sectors)}个板块数据")
-            else:
-                print(f"API获取数据不足，尝试HTML解析方式...")
-                # API失败时，尝试HTML解析方式
-                response = requests.get(html_url, headers=headers, timeout=15)
-                response.raise_for_status()
-                
-                # 解析页面
-                soup = BeautifulSoup(response.text, 'html.parser')
-                
-                # 打印页面中包含的div和table信息，用于调试
-                print(f"页面中div数量: {len(soup.find_all('div'))}")
-                print(f"页面中table数量: {len(soup.find_all('table'))}")
-                
-                # 方法1: 直接查找包含数据的表格
-                all_sectors = extract_data_from_tables(soup)
-                
-                # 如果方法1失败，尝试方法2: 从页面文本中提取数据
-                if len(all_sectors) < 5:  # 如果提取的数据太少，尝试另一种方法
-                    print("尝试从页面文本中提取数据...")
-                    all_sectors = extract_data_from_page_text(response.text)
-                
-                # 方法3: 使用pandas读取表格
-                if len(all_sectors) < 5:
-                    print("尝试使用pandas读取表格...")
-                    try:
-                        tables = pd.read_html(StringIO(response.text))
-                        for i, table in enumerate(tables):
-                            print(f"Pandas找到表格{i+1}，形状: {table.shape}")
-                            # 尝试处理表格数据
-                            if table.shape[0] > 10 and table.shape[1] > 8:  # 合理大小的表格
-                                sectors_from_pandas = process_pandas_table(table)
-                                if sectors_from_pandas:
-                                    all_sectors = sectors_from_pandas
-                                    break
-                    except Exception as e:
-                        print(f"Pandas读取表格失败: {e}")
-                
-                # 如果还是没有数据，直接返回空列表
-                if len(all_sectors) < 5:
-                    print("无法从页面获取足够数据，爬虫失败")
-                    return [], []
-            
-            print(f"总共提取到{len(all_sectors)}个板块数据")
-            
-            # 按主力净流入（超大单+大单）排序
-            all_sectors.sort(key=lambda x: (x['super_large_inflow'] + x['large_inflow']), reverse=True)
-            
-            # 获取前五个板块
-            top_sectors = all_sectors[:5]
-            
-            print(f"总共{len(all_sectors)}个板块，按主力净流入排序")
-            if top_sectors:
-                print(f"前三个板块: {[s['name'] for s in top_sectors]}")
-            else:
-                print("暂无符合条件的板块")
-            
-            # 保存爬取的数据到JSON文件
-            save_crawl_data(all_sectors, top_sectors)
-            
-            return top_sectors, all_sectors
-            
-        except Exception as e:
-            print(f"第{attempt + 1}次尝试失败: {str(e)}")
-            if attempt < max_retries - 1:
-                time.sleep(random.uniform(3, 5))  # 失败时等待更长时间
-            else:
-                print("最终未能获取东方财富网板块资金流入数据，爬虫失败")
-                return [], []
+            # 只打印前5个用于调试
+            if len(all_sectors) <= 5:
+                logger.debug(f"API提取板块数据: {sector_data['name']}, 超大单流入: {sector_data['super_large_inflow']}亿, 大单流入: {sector_data['large_inflow']}亿")
+        
+        except (ValueError, TypeError, KeyError) as e:
+            logger.warning(f"解析API数据项失败: {e}, 数据项: {item}")
+            continue
     
-    return [], []
+    logger.info(f"API成功获取到{len(all_sectors)}个板块数据")
+    return all_sectors
+
+def fetch_sectors_from_html() -> List[Dict]:
+    """从HTML页面获取板块数据"""
+    logger.info("尝试通过HTML解析获取板块数据...")
+    
+    try:
+        response = requests.get(
+            API_CONFIG['html_url'], 
+            headers=API_CONFIG['headers'], 
+            timeout=15
+        )
+        response.raise_for_status()
+        
+        soup = BeautifulSoup(response.text, 'html.parser')
+        
+        # 打印页面信息用于调试
+        logger.debug(f"页面中div数量: {len(soup.find_all('div'))}")
+        logger.debug(f"页面中table数量: {len(soup.find_all('table'))}")
+        
+        # 尝试多种数据提取方法
+        all_sectors = try_multiple_extraction_methods(soup, response.text)
+        
+        logger.info(f"HTML解析成功获取到{len(all_sectors)}个板块数据")
+        return all_sectors
+        
+    except requests.RequestException as e:
+        logger.error(f"HTML页面请求失败: {e}")
+        return []
+
+def try_multiple_extraction_methods(soup: BeautifulSoup, page_text: str) -> List[Dict]:
+    """尝试多种数据提取方法"""
+    all_sectors = []
+    
+    # 按照配置的提取方法顺序尝试
+    for method in EXTRACTION_CONFIG['extraction_methods']:
+        if method == 'html_table':
+            all_sectors = extract_data_from_tables(soup)
+        elif method == 'page_text':
+            all_sectors = extract_data_from_page_text(page_text)
+        elif method == 'pandas':
+            all_sectors = extract_with_pandas(page_text)
+        
+        # 如果获取到足够数据，停止尝试其他方法
+        if len(all_sectors) >= EXTRACTION_CONFIG['min_data_rows']:
+            logger.info(f"使用 {method} 方法成功获取到 {len(all_sectors)} 个板块数据")
+            break
+        else:
+            logger.info(f"{method} 方法获取数据不足 ({len(all_sectors)} < {EXTRACTION_CONFIG['min_data_rows']})，尝试下一种方法")
+    
+    return all_sectors
+
+def extract_with_pandas(page_text: str) -> List[Dict]:
+    """使用pandas提取表格数据"""
+    try:
+        tables = pd.read_html(StringIO(page_text))
+        for i, table in enumerate(tables):
+            logger.debug(f"Pandas找到表格{i+1}，形状: {table.shape}")
+            # 尝试处理表格数据
+            if table.shape[0] > 10 and table.shape[1] > 8:  # 合理大小的表格
+                sectors_from_pandas = process_pandas_table(table)
+                if sectors_from_pandas:
+                    return sectors_from_pandas
+    except Exception as e:
+        logger.error(f"Pandas读取表格失败: {e}")
+    
+    return []
+
+def process_sectors_data(all_sectors: List[Dict]) -> Tuple[List[Dict], List[Dict]]:
+    """处理板块数据，排序并提取前五个"""
+    logger.info(f"总共提取到{len(all_sectors)}个板块数据")
+    
+    # 按主力净流入（超大单+大单）排序
+    all_sectors.sort(key=lambda x: (x['super_large_inflow'] + x['large_inflow']), reverse=True)
+    
+    # 获取前五个板块
+    top_sectors = all_sectors[:5]
+    
+    logger.info(f"按主力净流入排序，前五个板块: {[s['name'] for s in top_sectors]}")
+    
+    # 保存爬取的数据到JSON文件
+    save_crawl_data(all_sectors, top_sectors)
+    
+    return top_sectors, all_sectors
 
 # 从表格中提取数据
 def extract_data_from_tables(soup):
@@ -171,7 +333,7 @@ def extract_data_from_tables(soup):
     # 尝试查找特定的表格容器
     table_container = soup.find('div', {'class': 'data-list'}) or soup.find('div', {'id': 'dt_1'})
     if table_container:
-        print("找到表格容器")
+        logger.debug("找到表格容器")
         tables = table_container.find_all('table')
     else:
         tables = soup.find_all('table')
@@ -189,27 +351,11 @@ def extract_data_from_tables(soup):
         header_cells = header_row.find_all(['th', 'td'])
         header_texts = [cell.get_text(strip=True) for cell in header_cells]
         
-        print(f"表头文本: {header_texts[:5]}...")
+        logger.debug(f"表头文本: {header_texts[:5]}...")
         
         # 根据表头内容确定数据列的位置
-        col_map = {}
-        for i, text in enumerate(header_texts):
-            if any(keyword in text for keyword in ['名称', '板块', '行业']):
-                col_map['name'] = i
-            elif any(keyword in text for keyword in ['涨跌幅', '涨', '跌幅']):
-                col_map['change_rate'] = i
-            elif any(keyword in text for keyword in ['超大单净流入']):
-                col_map['super_large_inflow'] = i
-            elif any(keyword in text for keyword in ['超大单净流入净占比']):
-                col_map['super_large_ratio'] = i
-            elif any(keyword in text for keyword in ['大单净流入']):
-                col_map['large_inflow'] = i
-            elif any(keyword in text for keyword in ['大单净流入净占比']):
-                col_map['large_ratio'] = i
-            elif any(keyword in text for keyword in ['主力净流入最大股']):
-                col_map['max_stock'] = i
-        
-        print(f"列映射: {col_map}")
+        col_map = build_column_mapping(header_texts)
+        logger.debug(f"列映射: {col_map}")
         
         # 处理数据行
         data_rows = rows[1:]
@@ -218,32 +364,80 @@ def extract_data_from_tables(soup):
             cell_texts = [cell.get_text(strip=True) for cell in cells]
             
             # 跳过空行或不符合条件的行
-            if len(cell_texts) < 8 or not cell_texts[0].strip().isdigit() and not cell_texts[1].strip():
+            if len(cell_texts) < EXTRACTION_CONFIG['table_min_cols']:
                 continue
             
             try:
                 # 提取数据
-                sector_data = {
-                    'name': cell_texts[col_map.get('name', 1)] if len(cell_texts) > col_map.get('name', 1) else '未知',
-                    'change_rate': extract_float_value(cell_texts[col_map.get('change_rate', 2)] if len(cell_texts) > col_map.get('change_rate', 2) else '0%'),
-                    'super_large_inflow': extract_float_value(cell_texts[col_map.get('super_large_inflow', 4)] if len(cell_texts) > col_map.get('super_large_inflow', 4) else '0亿'),
-                    'super_large_ratio': extract_float_value(cell_texts[col_map.get('super_large_ratio', 5)] if len(cell_texts) > col_map.get('super_large_ratio', 5) else '0%'),
-                    'large_inflow': extract_float_value(cell_texts[col_map.get('large_inflow', 6)] if len(cell_texts) > col_map.get('large_inflow', 6) else '0亿'),
-                    'large_ratio': extract_float_value(cell_texts[col_map.get('large_ratio', 7)] if len(cell_texts) > col_map.get('large_ratio', 7) else '0%'),
-                    'max_stock': cell_texts[col_map.get('max_stock', 9)] if len(cell_texts) > col_map.get('max_stock', 9) else '未知'
-                }
+                sector_data = extract_sector_data_from_row(cell_texts, col_map)
                 
                 # 验证数据有效性
-                if sector_data['name'] and sector_data['name'] not in ['净占比', '名称', '板块', '行业']:
+                if is_valid_sector_data(sector_data):
                     all_sectors.append(sector_data)
-                    if len(all_sectors) <= 5:  # 只打印前5个数据用于调试
-                        print(f"提取板块数据: {sector_data['name']}, 超大单流入: {sector_data['super_large_inflow']}亿, 大单流入: {sector_data['large_inflow']}亿")
+                    if len(all_sectors) <= EXTRACTION_CONFIG['debug_print_limit']:
+                        logger.debug(f"提取板块数据: {sector_data['name']}, 超大单流入: {sector_data['super_large_inflow']}亿, 大单流入: {sector_data['large_inflow']}亿")
             
             except Exception as e:
-                print(f"解析行数据失败: {e}, 行内容: {cell_texts[:5]}")
+                logger.warning(f"解析行数据失败: {e}, 行内容: {cell_texts[:5]}")
                 continue
     
     return all_sectors
+
+def build_column_mapping(header_texts: List[str]) -> Dict[str, int]:
+    """根据表头文本构建列映射"""
+    col_map = {}
+    
+    for field, keywords in FIELD_MAPPINGS.items():
+        for i, text in enumerate(header_texts):
+            if any(keyword in text for keyword in keywords):
+                col_map[field] = i
+                break
+    
+    # 为缺失的字段设置默认值
+    default_positions = {
+        'name': 1,
+        'change_rate': 2,
+        'super_large_inflow': 4,
+        'super_large_ratio': 5,
+        'large_inflow': 6,
+        'large_ratio': 7,
+        'max_stock': 9
+    }
+    
+    for field, default_pos in default_positions.items():
+        if field not in col_map:
+            col_map[field] = default_pos
+    
+    return col_map
+
+def extract_sector_data_from_row(cell_texts: List[str], col_map: Dict[str, int]) -> Dict[str, any]:
+    """从行数据中提取板块信息"""
+    return {
+        'name': safe_get_cell_text(cell_texts, col_map['name'], '未知'),
+        'change_rate': extract_float_value(safe_get_cell_text(cell_texts, col_map['change_rate'], '0%')),
+        'super_large_inflow': extract_float_value(safe_get_cell_text(cell_texts, col_map['super_large_inflow'], '0亿')),
+        'super_large_ratio': extract_float_value(safe_get_cell_text(cell_texts, col_map['super_large_ratio'], '0%')),
+        'large_inflow': extract_float_value(safe_get_cell_text(cell_texts, col_map['large_inflow'], '0亿')),
+        'large_ratio': extract_float_value(safe_get_cell_text(cell_texts, col_map['large_ratio'], '0%')),
+        'max_stock': safe_get_cell_text(cell_texts, col_map['max_stock'], '未知')
+    }
+
+def safe_get_cell_text(cell_texts: List[str], index: int, default: str = '') -> str:
+    """安全获取单元格文本"""
+    return cell_texts[index] if index < len(cell_texts) else default
+
+def is_valid_sector_data(sector_data: Dict[str, any]) -> bool:
+    """验证板块数据是否有效"""
+    if not sector_data.get('name') or sector_data['name'] in ['净占比', '名称', '板块', '行业']:
+        return False
+    
+    # 检查关键字段是否有有效值
+    required_fields = ['super_large_inflow', 'large_inflow']
+    for field in required_fields:
+        if not isinstance(sector_data.get(field), (int, float)):
+            return False
+    
+    return True
 
 # 从页面文本中提取数据
 def extract_data_from_page_text(page_text):
@@ -414,13 +608,10 @@ def get_sector_stocks(sector_code, sector_name, limit=30):
     获取板块中的个股数据，按资金流入排序
     包含丰富的因子计算数据：成交量、量比、换手率、市盈率、市值等
     """
-    print(f"[函数调用] get_sector_stocks(sector_code={sector_code}, sector_name={sector_name}, limit={limit})")
+    logger.info(f"[函数调用] get_sector_stocks(sector_code={sector_code}, sector_name={sector_name}, limit={limit})")
     
-    # 尝试不同的API端点
-    api_endpoints = [
-        "http://push2.eastmoney.com/api/qt/clist/get",
-        "http://60.push2.eastmoney.com/api/qt/clist/get",
-    ]
+    # 使用配置中的API端点
+    api_endpoints = [STOCK_API_CONFIG['base_url']] * 5
     
     # 尝试不同的过滤条件格式
     fs_param_variations = [
@@ -429,17 +620,12 @@ def get_sector_stocks(sector_code, sector_name, limit=30):
         f'm:90 t:2 f:BK{sector_code}',
     ]
     
-    # 模拟浏览器请求头
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
-        'Accept': '*/*',
-        'Accept-Language': 'zh-CN,zh;q=0.9',
-        'Connection': 'keep-alive',
-        'Referer': f'https://data.eastmoney.com/bkzj/{sector_code}.html',
-    }
+    # 使用配置中的请求头
+    headers = STOCK_API_CONFIG['headers'].copy()
+    headers['Referer'] = f'https://data.eastmoney.com/bkzj/{sector_code}.html'
     
-    # 字段列表 - 确保包含所有需要的数据
-    fields = 'f12,f14,f2,f3,f4,f5,f6,f7,f8,f9,f10,f11,f15,f16,f17,f18,f20,f21,f62,f66,f69,f72,f75,f128,f136,f152'
+    # 使用配置中的字段列表
+    fields = STOCK_API_CONFIG['stock_fields']
     
     # 尝试所有API端点和过滤条件组合
     for api_url in api_endpoints:
@@ -448,47 +634,42 @@ def get_sector_stocks(sector_code, sector_name, limit=30):
                 # 添加随机延迟避免请求过快
                 time.sleep(random.uniform(0.5, 2.0))
                 
-                print(f"尝试API: {api_url}, 过滤条件: {fs_param}")
+                logger.info(f"尝试API: {api_url}, 过滤条件: {fs_param}")
                 
                 # 构建API参数
-                params = {
+                params = STOCK_API_CONFIG['default_params'].copy()
+                params.update({
                     'pn': 1,  # 页码
                     'pz': limit,  # 每页数量
-                    'po': 1,  # 排序方式
-                    'np': 1,
-                    'ut': 'bd1d9ddb04089700cf9c27f6f7426281',
-                    'fltt': 2,  # 过滤条件
-                    'invt': 2,
-                    'fid': 'f62',  # 按主力净流入排序
                     'fs': fs_param,  # 板块过滤条件
                     'fields': fields,
                     '_': str(int(time.time() * 1000))  # 时间戳防止缓存
-                }
+                })
                 
                 response = requests.get(api_url, params=params, headers=headers, timeout=15)
                 response.raise_for_status()
                 
-                print(f"API响应状态码: {response.status_code}")
+                logger.info(f"API响应状态码: {response.status_code}")
                 
                 data = response.json()
                 
                 # 检查API响应结构
                 if not data.get('data'):
-                    print(f"API响应缺少data字段: {data.keys()}")
+                    logger.warning(f"API响应缺少data字段: {data.keys()}")
                     continue
                     
                 if not data['data'].get('diff'):
-                    print(f"API响应data中缺少diff字段: {data['data'].keys() if 'data' in data else '无'}")
+                    logger.warning(f"API响应data中缺少diff字段: {data['data'].keys() if 'data' in data else '无'}")
                     continue
                 
                 # 解析股票数据
                 stocks = []
                 diff_data = data['data']['diff']
-                print(f"获取到{len(diff_data)}条股票数据")
+                logger.info(f"获取到{len(diff_data)}条股票数据")
                 
-                # 打印第一条数据的字段，用于调试
-                if diff_data:
-                    print(f"第一条数据的字段: {list(diff_data[0].keys())}")
+                # 打印第一条数据的字段，用于调试（限制调试输出数量）
+                if diff_data and len(diff_data) <= EXTRACTION_CONFIG['debug_print_limit']:
+                    logger.debug(f"第一条数据的字段: {list(diff_data[0].keys())}")
                 
                 for stock in diff_data:
                     try:
@@ -528,26 +709,26 @@ def get_sector_stocks(sector_code, sector_name, limit=30):
                             stock_info = clean_stock_data(stock_info)
                             stocks.append(stock_info)
                             
-                            # 打印前5只股票信息
-                            if len(stocks) <= 5:
-                                print(f"股票数据: {stock_info['name']}({stock_info['code']}), 主力净流入: {stock_info['main_inflow']}亿")
+                            # 打印前5只股票信息（限制调试输出数量）
+                            if len(stocks) <= EXTRACTION_CONFIG['debug_print_limit']:
+                                logger.info(f"股票数据: {stock_info['name']}({stock_info['code']}), 主力净流入: {stock_info['main_inflow']}亿")
                     
                     except (ValueError, TypeError, KeyError) as e:
-                        print(f"解析股票数据失败: {e}, 股票数据: {stock}")
+                        logger.error(f"解析股票数据失败: {e}, 股票数据: {stock}")
                         continue
                 
                 # 如果获取到足够的数据，返回结果
                 if stocks:
-                    print(f"成功获取板块 '{sector_name}' 的 {len(stocks)} 只个股数据")
+                    logger.info(f"成功获取板块 '{sector_name}' 的 {len(stocks)} 只个股数据")
                     return stocks
                 
             except Exception as e:
-                print(f"使用API端点{api_url}和过滤条件{fs_param}获取数据失败: {e}")
+                logger.error(f"使用API端点{api_url}和过滤条件{fs_param}获取数据失败: {e}")
                 # 继续尝试下一个组合
                 continue
     
     # 如果所有API调用都失败，返回空列表
-    print(f"所有API调用都失败，未能获取板块 '{sector_name}' 的个股数据")
+    logger.error(f"所有API调用都失败，未能获取板块 '{sector_name}' 的个股数据")
     return []
 
 def get_sector_urls(top_sectors):
@@ -558,16 +739,8 @@ def get_sector_urls(top_sectors):
     urls = {}
     
     try:
-        # 设置请求头
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
-            'Accept-Language': 'zh-CN,zh;q=0.9',
-            'Accept-Encoding': 'gzip, deflate, br',
-            'Connection': 'keep-alive',
-            'Upgrade-Insecure-Requests': '1',
-            'Referer': 'https://data.eastmoney.com/',
-        }
+        # 使用配置中的请求头
+        headers = API_CONFIG['headers'].copy()
         
         # 添加随机延迟避免请求过快
         time.sleep(random.uniform(1.0, 3.0))
@@ -591,10 +764,10 @@ def get_sector_urls(top_sectors):
                 # 构建完整的URL
                 full_url = f"https://data.eastmoney.com{href}"
                 urls[text] = full_url
-                print(f"找到板块 '{text}' 的URL: {full_url}")
+                logger.info(f"找到板块 '{text}' 的URL: {full_url}")
         
     except Exception as e:
-        print(f"获取板块URL时出错: {e}")
+        logger.error(f"获取板块URL时出错: {e}")
     
     # 为每个板块添加URL信息
     sectors_with_urls = []
@@ -604,7 +777,7 @@ def get_sector_urls(top_sectors):
         sector_with_url = sector.copy()
         sector_with_url['url'] = urls.get(sector['name'], base_url)
         sectors_with_urls.append(sector_with_url)
-        print(f"获取板块URL: {sector['name']} -> {sector_with_url['url']}")
+        # 移除重复的日志输出，已在上面记录过URL信息
     
     return sectors_with_urls
 
@@ -677,14 +850,13 @@ def generate_selected_stocks_html(selected_stocks):
     if has_15day_score:
         html = """
     <div class="selected-stocks">
-        <h2>15天动量反转因子选股结果（前10名）</h2>
+        <h2>推荐前10个股</h2>
         <table class="stocks-table">
             <thead>
                 <tr>
                     <th>排名</th>
                     <th>股票代码</th>
                     <th>股票名称</th>
-                    <th>所属行业</th>
                     <th>价格</th>
                     <th>涨跌幅(%)</th>
                     <th>主力净流入(亿)</th>
@@ -697,14 +869,13 @@ def generate_selected_stocks_html(selected_stocks):
     else:
         html = """
     <div class="selected-stocks">
-        <h2>动量反转因子选股结果（前10名）</h2>
+        <h2>推荐前10个股</h2>
         <table class="stocks-table">
             <thead>
                 <tr>
                     <th>排名</th>
                     <th>股票代码</th>
                     <th>股票名称</th>
-                    <th>所属行业</th>
                     <th>价格</th>
                     <th>涨跌幅(%)</th>
                     <th>主力净流入(亿)</th>
@@ -1091,28 +1262,22 @@ def get_stock_history_prices(stock_code, days=15):
     end_date = datetime.now()
     start_date = end_date - timedelta(days=days * 2)  # 考虑非交易日，多取一些日期
     
-    # 东方财富历史K线数据API
-    url = "http://push2his.eastmoney.com/api/qt/stock/kline/get"
+    # 使用配置中的历史K线数据API
+    url = STOCK_API_CONFIG['kline_url']
     
-    params = {
+    params = STOCK_API_CONFIG['kline_params'].copy()
+    params.update({
         'secid': full_code,
-        'fields1': 'f1,f2,f3,f4,f5,f6',
-        'fields2': 'f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61',
-        'klt': '101',  # 日K线
-        'fqt': '1',    # 前复权
         'beg': start_date.strftime('%Y%m%d'),
         'end': end_date.strftime('%Y%m%d'),
         'lmt': days + 10,  # 多取一些数据，确保有足够交易日
         '_': str(int(time.time() * 1000))
-    }
+    })
     
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
-        'Referer': 'https://quote.eastmoney.com/',
-    }
+    headers = STOCK_API_CONFIG['headers'].copy()
     
     try:
-        print(f"正在获取股票 {stock_code} 的历史价格数据...")
+        logger.info(f"正在获取股票 {stock_code} 的历史价格数据...")
         
         # 添加随机延迟避免请求过快
         time.sleep(random.uniform(0.5, 1.5))
@@ -1138,14 +1303,14 @@ def get_stock_history_prices(stock_code, days=15):
                         'close_price': close_price
                     })
             
-            print(f"成功获取股票 {stock_code} 的 {len(history_prices)} 个交易日收盘价")
+            logger.info(f"成功获取股票 {stock_code} 的 {len(history_prices)} 个交易日收盘价")
             return history_prices
         else:
-            print(f"未获取到股票 {stock_code} 的历史价格数据")
+            logger.warning(f"未获取到股票 {stock_code} 的历史价格数据")
             return []
             
     except Exception as e:
-        print(f"获取股票 {stock_code} 历史价格数据失败: {e}")
+        logger.error(f"获取股票 {stock_code} 历史价格数据失败: {e}")
         return []
 
 # 为股票数据添加历史价格信息
@@ -1163,7 +1328,7 @@ def add_history_prices_to_stocks(stocks, days=15):
     if not stocks:
         return stocks
     
-    print(f"\n开始为 {len(stocks)} 只股票添加历史价格数据...")
+    logger.info(f"开始为 {len(stocks)} 只股票添加历史价格数据...")
     
     for i, stock in enumerate(stocks):
         stock_code = stock.get('code', '')
@@ -1197,84 +1362,97 @@ def add_history_prices_to_stocks(stocks, days=15):
                 stock['history_high'] = max(close_prices) if close_prices else 0
                 stock['history_low'] = min(close_prices) if close_prices else 0
                 
-                print(f"  [{i+1}/{len(stocks)}] {stock['name']}({stock_code}) - 历史价格数据已添加")
+                logger.info(f"  [{i+1}/{len(stocks)}] {stock['name']}({stock_code}) - 历史价格数据已添加")
             
             # 添加延迟避免请求过快
             time.sleep(0.5)
     
-    print("历史价格数据添加完成！")
+    logger.info("历史价格数据添加完成！")
     return stocks
 
 # 主函数
 def main():
-    print("开始爬取东方财富网板块资金流入数据...")
+    logger.info("开始爬取东方财富网板块资金流入数据...")
     
     # 爬取数据
     top_sectors, all_sectors = crawl_eastmoney_fund_flow()
     
-    # 获取板块跳转URL
+    # 初始化变量
+    top_sectors_with_urls = []
+    all_sector_stocks = {}
+    
+    # 获取板块跳转URL和个股数据
     if top_sectors:
-        print("\n获取板块跳转URL...")
+        logger.info("\n获取板块跳转URL...")
         top_sectors_with_urls = get_sector_urls(top_sectors)
         
         # 获取每个板块的个股数据
-        print("\n获取板块个股数据...")
-        all_sector_stocks = {}
-        
-        for sector in top_sectors_with_urls:
-            sector_name = sector['name']
-            sector_url = sector.get('url', '')
-            
-            # 从URL中提取板块代码
-            if '/bkzj/BK' in sector_url:
-                sector_code = sector_url.split('/bkzj/')[1].replace('.html', '')
-                
-                print(f"正在获取 '{sector_name}' 板块的个股数据...")
-                stocks = get_sector_stocks(sector_code, sector_name, limit=30)
-                
-                # 为个股添加历史价格数据
-                if stocks:
-                    stocks_with_history = add_history_prices_to_stocks(stocks, days=15)
-                    all_sector_stocks[sector_name] = stocks_with_history
-                    print(f"  成功获取 {len(stocks_with_history)} 只个股数据（包含历史价格）")
-                else:
-                    print(f"  未能获取到个股数据")
-                    all_sector_stocks[sector_name] = []
-                
-                # 添加延迟避免请求过快
-                import time
-                time.sleep(2)
-            else:
-                print(f"  无法从URL中提取板块代码: {sector_url}")
-                all_sector_stocks[sector_name] = []
+        logger.info("\n获取板块个股数据...")
+        all_sector_stocks = fetch_sector_stocks_data(top_sectors_with_urls)
         
         # 重新保存数据，包含URL和个股信息
         save_crawl_data(all_sectors, top_sectors_with_urls, all_sector_stocks)
     else:
-        top_sectors_with_urls = []
-        all_sector_stocks = {}
+        logger.warning("\n未能获取到符合条件的板块数据")
     
     # 生成HTML报告
     html_file = generate_html_report(top_sectors_with_urls, all_sectors)
     
+    # 输出结果
+    print_results_summary(top_sectors_with_urls, all_sector_stocks, html_file)
+
+def fetch_sector_stocks_data(top_sectors_with_urls: List[Dict]) -> Dict[str, List[Dict]]:
+    """获取所有板块的个股数据"""
+    all_sector_stocks = {}
+    
+    for sector in top_sectors_with_urls:
+        sector_name = sector['name']
+        sector_url = sector.get('url', '')
+        
+        # 从URL中提取板块代码
+        if '/bkzj/BK' in sector_url:
+            sector_code = sector_url.split('/bkzj/')[1].replace('.html', '')
+            
+            logger.info(f"正在获取 '{sector_name}' 板块的个股数据...")
+            stocks = get_sector_stocks(sector_code, sector_name, limit=30)
+            
+            # 为个股添加历史价格数据
+            if stocks:
+                stocks_with_history = add_history_prices_to_stocks(stocks, days=15)
+                all_sector_stocks[sector_name] = stocks_with_history
+                logger.info(f"  成功获取 {len(stocks_with_history)} 只个股数据（包含历史价格）")
+            else:
+                logger.warning(f"  未能获取到个股数据")
+                all_sector_stocks[sector_name] = []
+            
+            # 添加延迟避免请求过快
+            time.sleep(2)
+        else:
+            logger.warning(f"  无法从URL中提取板块代码: {sector_url}")
+            all_sector_stocks[sector_name] = []
+    
+    return all_sector_stocks
+
+def print_results_summary(top_sectors_with_urls: List[Dict], all_sector_stocks: Dict[str, List[Dict]], html_file: str):
+    """输出爬取结果摘要"""
     if html_file:
-        print(f"\n爬取和报告生成完成！")
-        print(f"1. 主力净流入前五个板块：")
+        logger.info(f"\n爬取和报告生成完成！")
+        logger.info(f"1. 主力净流入前五个板块：")
         if top_sectors_with_urls:
             for i, sector in enumerate(top_sectors_with_urls, 1):
                 url = sector.get('url', 'N/A')
                 stock_count = len(all_sector_stocks.get(sector['name'], []))
-                print(f"   {i}. {sector['name']} - 超大单流入: {sector['super_large_inflow']}亿, 大单流入: {sector['large_inflow']}亿, URL: {url}")
-                print(f"      个股数据: {stock_count} 只（包含15日历史价格）")
+                logger.info(f"   {i}. {sector['name']} - 超大单流入: {sector['super_large_inflow']}亿, 大单流入: {sector['large_inflow']}亿, URL: {url}")
+                logger.info(f"      个股数据: {stock_count} 只（包含15日历史价格）")
         else:
-            print("   暂无符合条件的板块")
+            logger.warning("   暂无符合条件的板块")
         
         total_stocks = sum(len(stocks) for stocks in all_sector_stocks.values())
-        print(f"2. 总共获取个股数据: {total_stocks} 只（包含15日历史价格）")
-        print(f"3. HTML报告已保存至: {html_file}")
-        print(f"4. 详细数据已保存至: eastmoney_crawl_data.json")
+        logger.info(f"2. 总共获取个股数据: {total_stocks} 只（包含15日历史价格）")
+        logger.info(f"3. HTML报告已保存至: {html_file}")
+        logger.info(f"4. 详细数据已保存至: eastmoney_crawl_data.json")
     else:
-        print("报告生成失败")
+        logger.error("报告生成失败")
 
 if __name__ == "__main__":
     main()
