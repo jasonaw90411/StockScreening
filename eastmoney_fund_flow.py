@@ -8,6 +8,7 @@ from bs4 import BeautifulSoup
 import time
 import random
 import pandas as pd
+from io import StringIO
 from urllib.parse import quote
 
 # 获取东方财富网板块资金流入数据
@@ -58,7 +59,7 @@ def crawl_eastmoney_fund_flow(max_retries=3):
             if len(all_sectors) < 5:
                 print("尝试使用pandas读取表格...")
                 try:
-                    tables = pd.read_html(response.text)
+                    tables = pd.read_html(StringIO(response.text))
                     for i, table in enumerate(tables):
                         print(f"Pandas找到表格{i+1}，形状: {table.shape}")
                         # 尝试处理表格数据
